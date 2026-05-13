@@ -107,10 +107,18 @@ def emit(
             continue
         n_observations = sum(traces.values())
 
-        # Return slot: last element of each CallTrace.
+        # Return slot: last element of each CallTrace. ``always-none-optional``
+        # is too noisy on returns -- __init__, descriptor __set__, and
+        # procedural methods that exist for their side effect (e.g.
+        # ``Flask.add_url_rule`` returns None on every call by design) all
+        # land here intentionally. Without comparing to the declared
+        # annotation we can't tell those apart from a real signal like
+        # ``def first(xs) -> int | None: return xs[0] if xs else None``
+        # observed to always return None, so we drop the shape for return
+        # slots and keep it only on args.
         return_obs = {t[-1] for t in traces}
         return_shape = degenerate_shape(return_obs)
-        if return_shape:
+        if return_shape and return_shape != "always-none-optional":
             n_empty = sum(c for t, c in traces.items() if _matches_shape(t[-1], return_shape))
             records.append(
                 _make_record(

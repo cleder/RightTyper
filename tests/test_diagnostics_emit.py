@@ -61,3 +61,45 @@ def test_emit_records_input_shape_gap_on_return(tmp_cwd):
     assert comp_line in cov["function_executed"], (
         f"expected comprehension line {comp_line} in function_executed {cov['function_executed']}"
     )
+
+
+def test_always_none_returns_are_not_reported(tmp_cwd):
+    """Functions that always return None on every call (``__init__``,
+    descriptor setters, void action methods, etc.) are common and
+    intentional in Python.  Without comparing observations to the
+    developer's declared annotation, we can't separate "intentionally
+    void" from "Optional[T] whose T-branch wasn't exercised" -- so the
+    emitter drops always-none-optional on returns. (Args remain reported.)
+    """
+    target = tmp_cwd / "t.py"
+    target.write_text(
+        textwrap.dedent(
+            """\
+            class C:
+                def __init__(self, x):
+                    self.x = x
+                def update(self, x):
+                    self.x = x
+
+            def void_fn():
+                pass
+
+            c = C(1)
+            c.update(2)
+            void_fn()
+            void_fn()
+            """
+        )
+    )
+
+    rt_run("--only-collect", "--with-coverage", str(target))
+    rt_run("process", "--with-coverage", "--no-output-files")
+
+    artifact = json.loads((tmp_cwd / "righttyper-diagnostics.json").read_text())
+    always_none_returns = [
+        r for r in artifact
+        if r["kind"] == "return" and r["degeneracy"]["shape"] == "always-none-optional"
+    ]
+    assert not always_none_returns, (
+        f"expected no always-none-optional return records; got {always_none_returns}"
+    )
