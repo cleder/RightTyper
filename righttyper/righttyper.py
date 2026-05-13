@@ -872,6 +872,13 @@ def add_output_options(group=None):
           " You can later process using RightTyper's \"process\" command."
 )
 @click.option(
+    "--with-coverage/--no-with-coverage",
+    default=run_options.with_coverage,
+    is_flag=True,
+    help="Capture branch and line coverage (using SlipCover) to identify "
+         "exercise-driver gaps behind degenerate annotations."
+)
+@click.option(
     "--allow-runtime-exceptions/--no-allow-runtime-exceptions",
     is_flag=True,
     default=run_options.allow_runtime_exceptions,
@@ -954,6 +961,13 @@ def run(
     run_options.process_args(kwargs)
     output_options.process_args(kwargs)
 
+    if run_options.with_coverage:
+        from righttyper import coverage as rt_coverage
+        try:
+            rt_coverage.enable(source=run_options.script_dir)
+        except rt_coverage.CoverageSetupError as e:
+            raise click.UsageError(str(e))
+
     if run_options.log_sampling:
         from righttyper.logger import init_sampling_log
         init_sampling_log()
@@ -1016,6 +1030,11 @@ def run(
                     'script': Path(script).resolve(),
                     'observations': obs,
                 }
+                if run_options.with_coverage:
+                    from righttyper import coverage as rt_coverage
+                    snap = rt_coverage.snapshot()
+                    if snap is not None:
+                        collected['coverage'] = snap
 
                 index = 1
                 while True:

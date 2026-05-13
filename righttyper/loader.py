@@ -14,6 +14,7 @@ from righttyper.variable_capture import code2variables, map_variables
 from righttyper.righttyper_utils import skip_this_file, skip_this_code
 from righttyper.righttyper_tool import setup_monitoring_for_code
 from righttyper.options import output_options
+from righttyper import coverage as rt_coverage
 
 
 class RightTyperLoader(ExecutionLoader):
@@ -44,7 +45,11 @@ class RightTyperLoader(ExecutionLoader):
     def get_code(self, fullname: str) -> types.CodeType:
         tree = ast.parse(self.get_source(fullname))
         tree = instrument(tree, replace_dict=self.replace_dict)
+        if rt_coverage.is_enabled():
+            tree = rt_coverage.preinstrument(tree)
         code = compile(tree, str(self.path), "exec")
+        if rt_coverage.is_enabled():
+            code = rt_coverage.instrument_code(code)
         code2variables.update(map_variables(
             tree, code,
             track_attributes=output_options.use_attribute_simplification,
