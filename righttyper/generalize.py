@@ -5,7 +5,7 @@ from collections import Counter
 from functools import cache
 from types import EllipsisType
 import sys
-from righttyper.typeinfo import TypeInfo, ListTypeInfo, CallTrace
+from righttyper.typeinfo import TypeInfo, ListTypeInfo, CallTrace, NoneTypeInfo
 from righttyper.type_id import get_type_name
 from righttyper.options import output_options
 
@@ -464,6 +464,47 @@ def _is_empty_container(t: TypeInfo) -> bool:
                 and isinstance(t.type_obj, type) and issubclass(t.type_obj, abc.Container)
                 and all(isinstance(a, TypeInfo) and a.type_obj is Never
                         for a in t.args))
+
+
+def _is_never_advanced(t: TypeInfo) -> bool:
+    """True for a Generator/AsyncGenerator/Iterator/AsyncIterator with a
+    None yield type, or a Coroutine whose return type is None: the iterator
+    was constructed but never driven past first yield (or the coroutine was
+    never awaited to a useful return).
+    """
+    if t.type_obj in (abc.Generator, abc.AsyncGenerator, abc.Iterator, abc.AsyncIterator) and t.args:
+        first = t.args[0]
+        return isinstance(first, TypeInfo) and first == NoneTypeInfo
+    if t.type_obj is abc.Coroutine and len(t.args) == 3:
+        last = t.args[2]
+        return isinstance(last, TypeInfo) and last == NoneTypeInfo
+    return False
+
+
+def degenerate_shape(observations: abc.Iterable[TypeInfo]) -> str | None:
+    """Classify an observation multiset for the diagnostics artifact.
+
+    Returns one of:
+      - "empty-container":          every observation is an empty container
+      - "never-advanced-generator": every observation is a never-advanced
+                                    Generator/Iterator/Coroutine
+      - "always-none-optional":     every observation is None
+      - None:                       not (uniformly) degenerate
+
+    Mixed shapes (e.g. one observation that is an empty list plus another
+    that is a never-advanced iterator) abstain: the predicate refuses to
+    pick a misleading shape and returns None.
+    """
+    obs = set(observations)
+    if not obs:
+        return None
+    if all(t == NoneTypeInfo for t in obs):
+        return "always-none-optional"
+    if all(_is_empty_container(t) for t in obs):
+        return "empty-container"
+    if all(_is_never_advanced(t) for t in obs):
+        return "never-advanced-generator"
+    return None
 
 
 def merged_types(
