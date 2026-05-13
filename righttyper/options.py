@@ -30,6 +30,7 @@ class OutputOptions:
     type_distribution_comments: bool = False
     use_attribute_simplification: bool = False
     use_constructor_types: bool = False
+    with_coverage: bool = False  # At run: enable SlipCover instrumentation; at process: emit diagnostics artifact
 
 
     def process_args(self, kwargs: dict[str, Any]) -> None:
@@ -90,7 +91,6 @@ class RunOptions:
     infer_wrapped_return_type: bool = True
     max_union_size: int = 32  # Unions exceeding this collapse to Any
     container_caching: bool = True  # Cache container scans; --no-container-caching forces rescan every visit
-    with_coverage: bool = False  # When True, compose slipcover branch instrumentation alongside RT and persist line coverage
 
 
     def process_args(self, kwargs: dict[str, Any]) -> None:

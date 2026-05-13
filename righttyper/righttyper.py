@@ -705,6 +705,13 @@ def add_output_options(group=None):
                 default=output_options.use_constructor_types,
                 help="""Whether to use a variable's source-level constructor or factory call (e.g., `p = Path("/tmp")` or `p = Path.cwd()`) as its annotation, when the observed runtime type is consistent with the call's declared return.""",
             ),
+            base.option(
+                "--with-coverage/--no-with-coverage",
+                is_flag=True,
+                default=output_options.with_coverage,
+                help="Capture branch and line coverage (using SlipCover) to identify "
+                     "exercise-driver gaps behind degenerate annotations.",
+            ),
         ]):
             func = opt(func)
         return func
@@ -872,13 +879,6 @@ def add_output_options(group=None):
           " You can later process using RightTyper's \"process\" command."
 )
 @click.option(
-    "--with-coverage/--no-with-coverage",
-    default=run_options.with_coverage,
-    is_flag=True,
-    help="Capture branch and line coverage (using SlipCover) to identify "
-         "exercise-driver gaps behind degenerate annotations."
-)
-@click.option(
     "--allow-runtime-exceptions/--no-allow-runtime-exceptions",
     is_flag=True,
     default=run_options.allow_runtime_exceptions,
@@ -961,7 +961,7 @@ def run(
     run_options.process_args(kwargs)
     output_options.process_args(kwargs)
 
-    if run_options.with_coverage:
+    if output_options.with_coverage:
         from righttyper import coverage as rt_coverage
         try:
             rt_coverage.enable(source=run_options.script_dir)
@@ -1030,7 +1030,7 @@ def run(
                     'script': Path(script).resolve(),
                     'observations': obs,
                 }
-                if run_options.with_coverage:
+                if output_options.with_coverage:
                     from righttyper import coverage as rt_coverage
                     snap = rt_coverage.snapshot()
                     if snap is not None:
@@ -1100,6 +1100,7 @@ def process(**kwargs):
     output_options.process_args(kwargs)
 
     obs_list = []
+    coverage_total: dict | None = None
     script = None
     for filename in Path('.').glob(PKL_FILE_NAME.format(N='*')):
         with filename.open("rb") as f:
@@ -1116,6 +1117,13 @@ def process(**kwargs):
 
             # TODO check for compatible options?
             obs_list.append(pkl['observations'])
+
+            if output_options.with_coverage and 'coverage' in pkl:
+                if coverage_total is None:
+                    coverage_total = pkl['coverage']
+                else:
+                    from slipcover import merge_coverage
+                    coverage_total = merge_coverage(coverage_total, pkl['coverage'])
 
     if not obs_list:
         print("Error: No files found")
@@ -1144,6 +1152,10 @@ def process(**kwargs):
     from righttyper.type_transformers import LoadTypeObjT
     obs.transform_types(LoadTypeObjT())
     process_obs(obs)
+
+    if output_options.with_coverage:
+        from righttyper import diagnostics
+        diagnostics.emit(obs, coverage_total, Path(diagnostics.ARTIFACT_NAME))
 
 
 @cli.command()
