@@ -774,6 +774,15 @@ def add_output_options(group=None):
     help="Expected sample captures per second (Poisson process rate).",
 )
 @click.option(
+    "--poisson-warmup-samples",
+    type=click.IntRange(0, None),
+    default=run_options.poisson_warmup_samples,
+    help="Capture this many initial calls per function before Poisson "
+         "sampling kicks in. Higher values catch rare per-call variants "
+         "(e.g. exception paths through __exit__) that the sampler may "
+         "otherwise miss; lower is faster.",
+)
+@click.option(
     "--call-sampling/--no-call-sampling",
     default=run_options.call_sampling,
     help=f"Whether to sample calls or to use every one.",
