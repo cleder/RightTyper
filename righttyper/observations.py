@@ -541,8 +541,57 @@ class Observations:
                 ct_dict[var_name] = set(tr.visit(t) for t in ct_types)
 
 
+    def _check_line_shifted_conflict(self, obs2: "Observations") -> None:
+        """Refuse to merge .rt files that come from different source revisions.
+
+        The merge keys on ``CodeId``, which embeds ``first_code_line``. If
+        two .rt files were recorded against versions of the same source file
+        whose line numbers differ (e.g. one before and one after
+        ``process --output-files`` rewrote annotations), the same
+        ``(file_name, func_name)`` ends up with different ``CodeId``s and
+        the merge silently keeps both entries as orphans — leaving the
+        downstream emitter to pick one and drop the other's observations.
+        Detect this and raise so the caller can re-collect against a
+        consistent source state.
+
+        Skips synthetic names (``<listcomp>``, ``<genexpr>``, ``<lambda>``,
+        ``<dictcomp>``, ``<setcomp>``) since those legitimately recur at
+        different lines in the same file.
+        """
+        if not self.func_info or not obs2.func_info:
+            return
+
+        def is_synthetic(name: "FunctionName") -> bool:
+            return name.startswith("<")
+
+        existing: dict[tuple["Filename", "FunctionName"], int] = {}
+        for fid in self.func_info:
+            if is_synthetic(fid.func_name):
+                continue
+            existing.setdefault(
+                (fid.file_name, fid.func_name), fid.first_code_line,
+            )
+
+        for fid in obs2.func_info:
+            if is_synthetic(fid.func_name):
+                continue
+            other_line = existing.get((fid.file_name, fid.func_name))
+            if other_line is None or other_line == fid.first_code_line:
+                continue
+            raise ValueError(
+                f"Refusing to merge: {fid.func_name!r} in {fid.file_name} "
+                f"has first_code_line {other_line} in one observation set "
+                f"and {fid.first_code_line} in the other. The .rt files "
+                f"were recorded against different source revisions (often "
+                f"because ``process --output-files`` rewrote annotations "
+                f"between collections). Remedy: delete righttyper-*.rt "
+                f"and re-collect against a consistent source state."
+            )
+
     def merge_observations(self, obs2: "Observations") -> None:
         """Merges other observations into this one."""
+
+        self._check_line_shifted_conflict(obs2)
 
         for func_id, func_info2 in obs2.func_info.items():
             if (func_info := self.func_info.get(func_id)):

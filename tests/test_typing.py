@@ -1387,6 +1387,55 @@ def test_merge_observations_unions_overrides_lists():
     assert len(merged) == 3
 
 
+def test_merge_observations_aborts_on_line_shifted_twin():
+    """Two .rt files recorded against different source revisions of the same
+    function produce FuncInfo entries with identical (file_name, func_name)
+    but different ``first_code_line``. The dict-key-based merge would silently
+    keep both entries as orphans, with the downstream emitter selecting one
+    and discarding the other's traces. Detect this and raise a loud error
+    pointing at the offending function.
+
+    Regression: a deployment-study session ran ``process --output-files``
+    against an editable tqdm install between two ``--only-collect`` runs.
+    The annotation rewrite shifted line numbers, so the second ``.rt``'s
+    CodeIds drifted from the first's. The merge silently dropped the
+    second .rt's wider observations and emitted the narrower annotation.
+    """
+    from righttyper.observations import (
+        Observations, FuncInfo, ArgInfo,
+    )
+    from righttyper.righttyper_types import (
+        ArgumentName, CodeId, Filename, FunctionName,
+    )
+
+    args = (
+        ArgInfo(ArgumentName("self"), None),
+        ArgInfo(ArgumentName("x"), None),
+    )
+    fid_pre = CodeId(Filename("m.py"), FunctionName("Cls.method"), 61, 0)
+    fid_post = CodeId(Filename("m.py"), FunctionName("Cls.method"), 57, 0)
+
+    obs1 = Observations()
+    obs1.func_info[fid_pre] = FuncInfo(
+        code_id=fid_pre, args=args, varargs=None, kwargs=None,
+    )
+    obs2 = Observations()
+    obs2.func_info[fid_post] = FuncInfo(
+        code_id=fid_post, args=args, varargs=None, kwargs=None,
+    )
+
+    import pytest
+    with pytest.raises(ValueError) as exc_info:
+        obs1.merge_observations(obs2)
+
+    msg = str(exc_info.value)
+    # Error must be actionable: name the function and both line numbers.
+    assert "Cls.method" in msg
+    assert "m.py" in msg
+    assert "61" in msg
+    assert "57" in msg
+
+
 def test_sample_until_stable_lifetime_budget(monkeypatch):
     """container_max_samples is a per-container lifetime budget, not a
     per-call cap.  Once the cumulative samples for a container reach the
