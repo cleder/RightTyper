@@ -1436,6 +1436,44 @@ def test_merge_observations_aborts_on_line_shifted_twin():
     assert "57" in msg
 
 
+def test_merge_observations_accepts_nested_lambda_at_different_lines():
+    """Two ``<lambda>`` expressions nested in the same enclosing function
+    (qualname ``Outer.<locals>.<lambda>``) can legitimately appear at
+    different lines with the same parameter shape — they're distinct
+    callable values, not a line-shifted version of one another.
+    The synthetic check must look at the trailing qualname segment, not
+    only the first character.
+
+    Regression: tqdm's ``_decr_instances`` has two
+    ``Outer.<locals>.<lambda>`` callables at different lines, both with
+    parameter ``(inst,)``. The first-pass detection raised on them."""
+    from righttyper.observations import (
+        Observations, FuncInfo, ArgInfo,
+    )
+    from righttyper.righttyper_types import (
+        ArgumentName, CodeId, Filename, FunctionName,
+    )
+
+    nested_name = FunctionName("tqdm._decr_instances.<locals>.<lambda>")
+    fid_a = CodeId(Filename("m.py"), nested_name, 708, 0)
+    fid_b = CodeId(Filename("m.py"), nested_name, 712, 0)
+    args = (ArgInfo(ArgumentName("inst"), None),)
+
+    obs1 = Observations()
+    obs1.func_info[fid_a] = FuncInfo(
+        code_id=fid_a, args=args, varargs=None, kwargs=None,
+    )
+    obs2 = Observations()
+    obs2.func_info[fid_b] = FuncInfo(
+        code_id=fid_b, args=args, varargs=None, kwargs=None,
+    )
+
+    # Must not raise — distinct nested lambdas are legitimate.
+    obs1.merge_observations(obs2)
+    assert fid_a in obs1.func_info
+    assert fid_b in obs1.func_info
+
+
 def test_merge_observations_accepts_property_getter_setter_pair():
     """A property getter and setter share ``func_name`` but live at
     distinct lines with different parameter shapes (``(self,)`` vs

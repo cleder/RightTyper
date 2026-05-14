@@ -575,7 +575,12 @@ class Observations:
             return
 
         def is_synthetic(name: "FunctionName") -> bool:
-            return name.startswith("<")
+            # Synthetic functions (<lambda>, <listcomp>, <genexpr>,
+            # <dictcomp>, <setcomp>) legitimately recur at different
+            # lines in the same file with the same parameter shape.
+            # CPython qualnames them either as the bare synthetic
+            # (top-level) or as ``Outer.<locals>.<synthetic>`` (nested).
+            return name.startswith("<") or name.rsplit(".", 1)[-1].startswith("<")
 
         # The key disambiguates entries that legitimately share
         # (file_name, func_name) at distinct lines — property
