@@ -1436,6 +1436,47 @@ def test_merge_observations_aborts_on_line_shifted_twin():
     assert "57" in msg
 
 
+def test_merge_observations_accepts_property_getter_setter_pair():
+    """A property getter and setter share ``func_name`` but live at
+    distinct lines with different parameter shapes (``(self,)`` vs
+    ``(self, value)``). The line-shift detector must not flag this as
+    a source-revision conflict.
+
+    Concretely: tqdm's ``Bar.colour`` has a getter at one line and a
+    setter at another. Pytest may exercise the getter while a separate
+    exercise script exercises the setter — both .rt files are valid and
+    must merge cleanly.
+    """
+    from righttyper.observations import (
+        Observations, FuncInfo, ArgInfo,
+    )
+    from righttyper.righttyper_types import (
+        ArgumentName, CodeId, Filename, FunctionName,
+    )
+
+    getter_id = CodeId(Filename("m.py"), FunctionName("Cls.prop"), 100, 0)
+    setter_id = CodeId(Filename("m.py"), FunctionName("Cls.prop"), 104, 0)
+
+    obs1 = Observations()
+    obs1.func_info[getter_id] = FuncInfo(
+        code_id=getter_id,
+        args=(ArgInfo(ArgumentName("self"), None),),
+        varargs=None, kwargs=None,
+    )
+    obs2 = Observations()
+    obs2.func_info[setter_id] = FuncInfo(
+        code_id=setter_id,
+        args=(ArgInfo(ArgumentName("self"), None),
+              ArgInfo(ArgumentName("value"), None)),
+        varargs=None, kwargs=None,
+    )
+
+    # Must not raise — different arities disambiguate them.
+    obs1.merge_observations(obs2)
+    assert getter_id in obs1.func_info
+    assert setter_id in obs1.func_info
+
+
 def test_sample_until_stable_lifetime_budget(monkeypatch):
     """container_max_samples is a per-container lifetime budget, not a
     per-call cap.  Once the cumulative samples for a container reach the

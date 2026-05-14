@@ -554,9 +554,22 @@ class Observations:
         Detect this and raise so the caller can re-collect against a
         consistent source state.
 
-        Skips synthetic names (``<listcomp>``, ``<genexpr>``, ``<lambda>``,
-        ``<dictcomp>``, ``<setcomp>``) since those legitimately recur at
-        different lines in the same file.
+        Some legitimate cases share a ``(file_name, func_name)`` across
+        distinct ``first_code_line`` values without being a conflict:
+
+          * property getter/setter/deleter (all reported as ``Cls.prop``);
+          * synthetic names — ``<listcomp>``, ``<genexpr>``, ``<lambda>``,
+            ``<dictcomp>``, ``<setcomp>``;
+          * any user-defined overload that genuinely has the same qualname
+            at multiple source locations.
+
+        The disambiguator: collect the *set* of observed lines per
+        ``(file_name, func_name)`` from each side. A line from ``obs2``
+        only triggers a conflict if it is **not present** in ``obs1``'s
+        set for that name *and* ``obs1``'s set is non-empty — i.e. each
+        side independently saw a different line for what they think is
+        the same function. When both sides agree that a name has both
+        lines (typical of getter/setter), that's fine.
         """
         if not self.func_info or not obs2.func_info:
             return
@@ -564,28 +577,51 @@ class Observations:
         def is_synthetic(name: "FunctionName") -> bool:
             return name.startswith("<")
 
-        existing: dict[tuple["Filename", "FunctionName"], int] = {}
-        for fid in self.func_info:
-            if is_synthetic(fid.func_name):
-                continue
-            existing.setdefault(
-                (fid.file_name, fid.func_name), fid.first_code_line,
+        # The key disambiguates entries that legitimately share
+        # (file_name, func_name) at distinct lines — property
+        # getter/setter, methods with different arities, etc. — by their
+        # parameter shape. A line shift caused by source-revision drift
+        # would preserve the signature but change the line; that case
+        # produces a single ``key`` that maps to different lines in obs1
+        # vs obs2 and triggers the raise.
+        def sig_key(
+            fi: "FuncInfo",
+        ) -> tuple["Filename", "FunctionName", tuple["ArgumentName", ...],
+                  "ArgumentName | None", "ArgumentName | None"]:
+            return (
+                fi.code_id.file_name,
+                fi.code_id.func_name,
+                tuple(a.arg_name for a in fi.args),
+                fi.varargs,
+                fi.kwargs,
             )
 
-        for fid in obs2.func_info:
-            if is_synthetic(fid.func_name):
+        def line_by_sig(obs: "Observations") -> dict[tuple, int]:
+            out: dict[tuple, int] = {}
+            for fi in obs.func_info.values():
+                if is_synthetic(fi.code_id.func_name):
+                    continue
+                out[sig_key(fi)] = fi.code_id.first_code_line
+            return out
+
+        lines1 = line_by_sig(self)
+        lines2 = line_by_sig(obs2)
+
+        for key, l2 in lines2.items():
+            l1 = lines1.get(key)
+            if l1 is None or l1 == l2:
                 continue
-            other_line = existing.get((fid.file_name, fid.func_name))
-            if other_line is None or other_line == fid.first_code_line:
-                continue
+            file_name = key[0]
+            func_name = key[1]
             raise ValueError(
-                f"Refusing to merge: {fid.func_name!r} in {fid.file_name} "
-                f"has first_code_line {other_line} in one observation set "
-                f"and {fid.first_code_line} in the other. The .rt files "
-                f"were recorded against different source revisions (often "
-                f"because ``process --output-files`` rewrote annotations "
-                f"between collections). Remedy: delete righttyper-*.rt "
-                f"and re-collect against a consistent source state."
+                f"Refusing to merge: {func_name!r} in {file_name} has "
+                f"first_code_line {l1} in one observation set and {l2} "
+                f"in the other (same parameter shape). The .rt files "
+                f"were recorded against different source revisions "
+                f"(often because ``process --output-files`` rewrote "
+                f"annotations between collections). Remedy: delete "
+                f"righttyper-*.rt and re-collect against a consistent "
+                f"source state."
             )
 
     def merge_observations(self, obs2: "Observations") -> None:
