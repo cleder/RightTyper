@@ -118,7 +118,14 @@ class PendingCallTrace:
         self_type: TypeInfo|None,
     ) -> None:
         self.arg_info = arg_info
-        self.args_start = self._get_arg_types(arg_info)
+        # PY_START's arg_info.locals always contains every arg name (Python
+        # binds parameters before the body runs), so no element here is
+        # ever None — the per-entry None case in _get_arg_types only
+        # applies to later samples where a name may have been del'd.
+        self.args_start = typing.cast(
+            "tuple[TypeInfo, ...]",
+            self._get_arg_types(arg_info, arg_info.locals),
+        )
         self.yields: set[TypeInfo] = set()
         self.sends: set[TypeInfo] = set()
         self.is_async = bool(co_flags & (inspect.CO_ASYNC_GENERATOR | inspect.CO_COROUTINE))
@@ -127,36 +134,45 @@ class PendingCallTrace:
 
 
     @staticmethod
-    def _get_arg_types(arg_info: inspect.ArgInfo) -> tuple[TypeInfo, ...]:
-        """Computes the types of the given arguments."""
+    def _get_arg_types(
+        arg_info: inspect.ArgInfo,
+        locals_map: abc.Mapping[str, Any],
+    ) -> tuple[TypeInfo | None, ...]:
+        """Computes the types of the given arguments by looking up each name
+        in ``locals_map``. Yields ``None`` for any name absent from it
+        (callers fall back to the entry-time observation)."""
         return (
             *(
-                get_value_type(arg_info.locals[arg_name]) if arg_name in arg_info.locals else None
+                get_value_type(locals_map[arg_name]) if arg_name in locals_map else None
                 for arg_name in arg_info.args
             ),
             *(
                 (
                     # Empty *args/**kwargs → Never, absorbed by the union.
                     TypeInfo.from_set({
-                        get_value_type(val) for val in arg_info.locals[arg_info.varargs]
+                        get_value_type(val) for val in locals_map[arg_info.varargs]
                     })
-                    if arg_info.varargs in arg_info.locals else None,
+                    if arg_info.varargs in locals_map else None,
                 )
                 if arg_info.varargs else ()
             ),
             *(
                 (
                     TypeInfo.from_set({
-                        get_value_type(val) for val in arg_info.locals[arg_info.keywords].values()
+                        get_value_type(val) for val in locals_map[arg_info.keywords].values()
                     })
-                    if arg_info.keywords in arg_info.locals else None,
+                    if arg_info.keywords in locals_map else None,
                 )
                 if arg_info.keywords else ()
             )
         )
 
 
-    def finish(self, retval: TypeInfo) -> CallTrace:
+    def finish(
+        self,
+        retval: TypeInfo,
+        locals_map: abc.Mapping[str, Any],
+    ) -> CallTrace:
         if self.is_generator:
             # A generator that never yielded/sent really has type None.
             y = TypeInfo.from_set(self.yields, on_empty=NoneTypeInfo)
@@ -167,12 +183,18 @@ class PendingCallTrace:
             else:
                 retval = TypeInfo.from_type(abc.Generator, args=(y, s, retval))
 
-        # Arguments may change value (and, in particular, empty containers may be added to)
-        # during the function execution, so we sample a 2nd time at the end.
-        args_now = self._get_arg_types(self.arg_info)
+        # Arguments may change value during execution — either a mutable
+        # container is filled in, or the parameter name is rebound to a
+        # different value (possibly of a different type). Callers with a
+        # live returning frame pass its ``f_locals`` to capture both kinds
+        # of change; callers without one (wrapped traces whose function
+        # never ran, leftover generators at shutdown) pass the PY_START
+        # snapshot, which still reflects in-place container mutations.
+        args_now = self._get_arg_types(self.arg_info, locals_map)
         type_data: tuple[TypeInfo, ...] = (
-            *tuple(
-                at_start if now is None else TypeInfo.from_set({at_start, now})
+            *(
+                at_start if now is None
+                else cast_not_None(TypeInfo.from_set({at_start, now}))
                 for at_start, now in zip(self.args_start, args_now)
             ),
             retval
@@ -567,8 +589,17 @@ class ObservationsRecorder:
                     class_attrs[VariableName(attr)].add(TypeInfo.from_type(const_type))
 
 
-    def _record_return_type(self, tr: PendingCallTrace, code: CodeType, ret_type: Any) -> None:
-        """Records a pending call trace's return type, finishing the trace."""
+    def _record_return_type(
+        self,
+        tr: PendingCallTrace,
+        code: CodeType,
+        ret_type: Any,
+        locals_map: abc.Mapping[str, Any],
+    ) -> None:
+        """Records a pending call trace's return type, finishing the trace.
+        ``locals_map`` is the live ``frame.f_locals`` from the returning
+        frame, or the PY_START snapshot when no live frame is available
+        (wrapped traces whose function never ran; leftover generators)."""
         assert tr is not None
 
         retval_type = (
@@ -581,7 +612,7 @@ class ObservationsRecorder:
         )
 
         func_info = self._code2func_info[code]
-        func_info.traces.update((tr.finish(retval_type),))
+        func_info.traces.update((tr.finish(retval_type, locals_map),))
 
 
     def _complete_wrapped_trace(self, code: CodeType, frame_id: FrameId, return_value: Any) -> None:
@@ -600,7 +631,10 @@ class ObservationsRecorder:
                     if run_options.infer_wrapped_return_type
                     else UnknownTypeInfo
                 )
-                self._record_return_type(tr, wrapped_code, retval_type)
+                # No live frame for the wrapped function (it never ran);
+                # re-sample from the PY_START snapshot to preserve any
+                # in-place container mutations.
+                self._record_return_type(tr, wrapped_code, retval_type, tr.arg_info.locals)
 
 
     def record_return(self, code: CodeType, frame: FrameType, return_value: Any) -> bool:
@@ -609,7 +643,7 @@ class ObservationsRecorder:
         # print(f"record_return {code.co_qualname}")
         frame_id = id(frame)
         if (per_frame := self._pending_traces.get(code)) and (tr := per_frame.get(frame_id)):
-            self._record_return_type(tr, code, get_value_type(return_value))
+            self._record_return_type(tr, code, get_value_type(return_value), frame.f_locals)
             self._record_variables(code, frame)
             del per_frame[frame_id]
             self._complete_wrapped_trace(code, frame_id, return_value)
@@ -626,7 +660,7 @@ class ObservationsRecorder:
         # print(f"record_no_return {code.co_qualname}")
         frame_id = id(frame)
         if (per_frame := self._pending_traces.get(code)) and (tr := per_frame.get(frame_id)):
-            self._record_return_type(tr, code, None)
+            self._record_return_type(tr, code, None, frame.f_locals)
             self._record_variables(code, frame)
             del per_frame[frame_id]
             # Discard wrapped trace on exception
@@ -773,7 +807,9 @@ class ObservationsRecorder:
         for code, per_frame in self._pending_traces.items():
             for tr in per_frame.values():
                 if tr.is_generator:
-                    self._record_return_type(tr, code, None)
+                    # Their frames are no longer reachable here; re-sample
+                    # from the PY_START snapshot.
+                    self._record_return_type(tr, code, None, tr.arg_info.locals)
 
         self._assign_attributes_to_scopes()
 

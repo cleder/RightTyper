@@ -704,6 +704,30 @@ def test_default_in_private_method():
     """)
 
 
+def test_parameter_reassigned_to_different_type():
+    """A parameter rebound inside the body to a different type must be
+    annotated with the union of both types — otherwise the rebinding
+    statement itself fails to type-check (mypy: 'Incompatible types in
+    assignment')."""
+    t = textwrap.dedent("""\
+        def f(x):
+            x = str(x)
+            return x
+
+        f(42)
+        """)
+
+    Path("t.py").write_text(t)
+
+    rt_run('t.py')
+    output = Path("t.py").read_text()
+    code = cst.parse_module(output)
+
+    assert get_function(code, 'f') == textwrap.dedent("""\
+        def f(x: int|str) -> str: ...
+    """)
+
+
 @pytest.mark.skipif(importlib.util.find_spec('numpy') is None, reason='missing module')
 def test_default_is_numpy_array_more_than_one_element():
     t = textwrap.dedent("""\
