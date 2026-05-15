@@ -1,5 +1,5 @@
 import typing
-from typing import Iterator, Iterable, Final, Callable, Any, cast
+from typing import Iterator, Iterable, Final, Callable, Any, cast, overload
 import types
 from dataclasses import dataclass, fields, replace, field
 from righttyper.righttyper_types import CodeId
@@ -100,6 +100,16 @@ class TypeInfo:
             **kwargs
         )
 
+
+    @overload
+    @staticmethod
+    def from_set(s: "set[TypeInfo]", **kwargs: Any) -> "TypeInfo": ...
+    @overload
+    @staticmethod
+    def from_set(s: "set[TypeInfo]", on_empty: "TypeInfo", **kwargs: Any) -> "TypeInfo": ...
+    @overload
+    @staticmethod
+    def from_set(s: "set[TypeInfo]", on_empty: None, **kwargs: Any) -> "TypeInfo | None": ...
 
     @staticmethod
     def from_set(s: "set[TypeInfo]", on_empty: Any = _UNSET,
