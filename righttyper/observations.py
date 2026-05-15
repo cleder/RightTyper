@@ -896,6 +896,7 @@ class Observations:
         # process this trace, any nested Callable/Generator code_ids it contains
         # have ready annotations. This lets the Self detection below recurse
         # into resolved types (e.g., a lambda's retval that matches self_class).
+        resolver: ResolvingT | None = None
         if annotations:
             resolver = ResolvingT(
                 annotations,
@@ -967,7 +968,7 @@ class Observations:
         variables = {
             var_name: _apply_constructor_type(
                 merged_types(
-                    {resolver.visit(t) for t in var_types} if annotations else var_types,
+                    {resolver.visit(t) for t in var_types} if resolver is not None else var_types,
                     for_variable=True,
                     accessed_attributes=accessed_attributes.get(var_name) if accessed_attributes else None,
                 ),

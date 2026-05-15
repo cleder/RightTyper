@@ -1111,6 +1111,7 @@ def process(**kwargs):
     obs_list = []
     coverage_total: dict | None = None
     script = None
+    pkl: dict = {}
     for filename in Path('.').glob(PKL_FILE_NAME.format(N='*')):
         with filename.open("rb") as f:
             pkl = pickle.load(f)

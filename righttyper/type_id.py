@@ -518,6 +518,8 @@ def _get_container_args(
     stopping_reason: str | None = None
     sample_trigger: str | None = None
     n_samples_before = 0
+    current_size = 0
+    is_small = False
 
     if run_options.log_sampling:
         n_samples_before = entry.all_samples[0].total()

@@ -7,7 +7,12 @@ from righttyper.righttyper_utils import normalize_module_name
 
 
 # The typing module does not define a type for such "typing special forms".
-type SpecialForms = typing.Any|typing.Never
+# from_type accepts both regular types and special forms like typing.Any,
+# typing.Never, typing.NoReturn, typing.Self, typing.Callable, typing.Union,
+# and typing.Optional. There isn't a good way to narrow to just these:
+# mypy and pyright disagree on how to model them, and any union containing
+# typing.Any collapses to Any anyway. The alias is kept for documentation.
+type SpecialForms = typing.Any
 
 # What is allowed in TypeInfo.args
 type TypeInfoArg = TypeInfo|str|types.EllipsisType|tuple[()]
