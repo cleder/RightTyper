@@ -680,10 +680,14 @@ class Observations:
                                          f"    {a2.arg_name}"
                         )
                 if args1 != args2:
+                    # Empty default set → no-default arg; preserve Python None.
                     func_info.args = tuple(
                         ArgInfo(
                             a1.arg_name,
-                            TypeInfo.from_set({d for d in (a1.default, a2.default) if d is not None}, empty_is_none=True)
+                            TypeInfo.from_set(
+                                {d for d in (a1.default, a2.default) if d is not None},
+                                on_empty=None,
+                            )
                         )
                         for a1, a2 in zip(args1, args2)
                     )

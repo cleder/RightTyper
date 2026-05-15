@@ -136,9 +136,10 @@ class PendingCallTrace:
             ),
             *(
                 (
+                    # Empty *args/**kwargs → Never, absorbed by the union.
                     TypeInfo.from_set({
                         get_value_type(val) for val in arg_info.locals[arg_info.varargs]
-                    }, empty_is_none=True)
+                    })
                     if arg_info.varargs in arg_info.locals else None,
                 )
                 if arg_info.varargs else ()
@@ -147,7 +148,7 @@ class PendingCallTrace:
                 (
                     TypeInfo.from_set({
                         get_value_type(val) for val in arg_info.locals[arg_info.keywords].values()
-                    }, empty_is_none=True)
+                    })
                     if arg_info.keywords in arg_info.locals else None,
                 )
                 if arg_info.keywords else ()
@@ -157,8 +158,9 @@ class PendingCallTrace:
 
     def finish(self, retval: TypeInfo) -> CallTrace:
         if self.is_generator:
-            y = TypeInfo.from_set(self.yields, empty_is_none=True)
-            s = TypeInfo.from_set(self.sends, empty_is_none=True)
+            # A generator that never yielded/sent really has type None.
+            y = TypeInfo.from_set(self.yields, on_empty=NoneTypeInfo)
+            s = TypeInfo.from_set(self.sends, on_empty=NoneTypeInfo)
 
             if self.is_async:
                 retval = TypeInfo.from_type(abc.AsyncGenerator, args=(y, s))

@@ -13,6 +13,14 @@ type SpecialForms = typing.Any|typing.Never
 type TypeInfoArg = TypeInfo|str|types.EllipsisType|tuple[()]
 
 
+# Sentinel for ``TypeInfo.from_set``'s ``on_empty`` parameter to
+# distinguish "caller didn't specify what to return on empty input"
+# from "caller wants Python ``None`` returned." Defaulting directly to
+# ``TypeInfo.from_type(typing.Never)`` isn't possible because ``TypeInfo``
+# isn't yet bound at class-body evaluation time.
+_UNSET: Any = object()
+
+
 @dataclass(eq=True, frozen=True)
 class TypeInfo:
     """Holds information about a type."""
@@ -94,15 +102,29 @@ class TypeInfo:
 
 
     @staticmethod
-    def from_set(s: "set[TypeInfo]", empty_is_none=False, **kwargs: Any) -> "TypeInfo":
+    def from_set(s: "set[TypeInfo]", on_empty: Any = _UNSET,
+                 **kwargs: Any) -> "TypeInfo | None":
         """Form a union from a set, with simplification.
 
         Expands nested unions, subsumes Any, removes Never/NoReturn,
         cleans up Never-generics, caps oversized unions, and sorts
         for deterministic output.
+
+        ``on_empty`` controls what to return when ``s`` is empty:
+
+        - default (unset): ``typing.Never`` TypeInfo — appropriate for
+          "no observations contribute here, leave as the union identity."
+        - ``NoneTypeInfo``: appropriate for slots where empty really means
+          the type is ``None`` (e.g. a generator that never yielded).
+        - Python ``None``: signals "no information" — return the
+          sentinel rather than a type. Callers that hold a
+          ``TypeInfo | None`` field (e.g. ``ArgInfo.default``) use this.
+        - Any other ``TypeInfo``: returned as-is.
         """
         if not s:
-            return NoneTypeInfo if empty_is_none else TypeInfo.from_type(typing.Never)
+            if on_empty is _UNSET:
+                return TypeInfo.from_type(typing.Never)
+            return on_empty
 
         def expand_unions(t: "TypeInfo") -> Iterator["TypeInfo"]:
             # Don't merge unions designated as typevars, or the typevar gets lost.

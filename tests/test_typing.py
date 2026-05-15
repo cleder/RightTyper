@@ -366,9 +366,6 @@ def test_typeinfo_from_set():
     t = TypeInfo.from_set(set())
     assert str(t) == "typing.Never"
 
-    t = TypeInfo.from_set(set(), empty_is_none=True)
-    assert t is NoneTypeInfo
-
     t = TypeInfo.from_set({TypeInfo.from_type(int)})
 
     assert str(t) == 'int'
@@ -377,6 +374,46 @@ def test_typeinfo_from_set():
 
     assert t is not TypeInfo.from_type(int) # should be new object
     assert t.type_obj is int
+
+
+def test_typeinfo_from_set_on_empty():
+    """``from_set`` lets the caller name what to return when the input
+    set is empty. Replaces the older ``empty_is_none=True`` flag, which
+    conflated three distinct semantics into one boolean:
+
+    - ``NoneTypeInfo`` — for slots where empty observations genuinely
+      mean "the type is None" (e.g., a generator that never yielded).
+    - ``Never`` — for slots where empty observations contribute nothing
+      to a union (e.g., a varargs slot at a call with no extras).
+    - ``None`` (Python sentinel) — for slots where empty means "no
+      information was recorded" (e.g., the merged-arg-default rebuild
+      whose absence of defaults must not invent a None default).
+
+    A single ``on_empty=<value>`` parameter lets each caller pick the
+    right sentinel.
+    """
+    from righttyper.typeinfo import NoneTypeInfo
+
+    # Default behavior: empty → Never (unchanged from before).
+    t = TypeInfo.from_set(set())
+    assert str(t) == "typing.Never"
+
+    # Generator-yields-nothing case: empty → NoneTypeInfo.
+    t = TypeInfo.from_set(set(), on_empty=NoneTypeInfo)
+    assert t is NoneTypeInfo
+
+    # No-information case: empty → Python None (sentinel).
+    t = TypeInfo.from_set(set(), on_empty=None)
+    assert t is None
+
+    # Caller-supplied sentinel: anything else they want.
+    sentinel = TypeInfo.from_type(int)
+    t = TypeInfo.from_set(set(), on_empty=sentinel)
+    assert t is sentinel
+
+    # Non-empty input: unchanged (on_empty ignored).
+    t = TypeInfo.from_set({TypeInfo.from_type(int)}, on_empty=None)
+    assert str(t) == 'int'
 
     t = TypeInfo.from_set({
             TypeInfo.from_type(int),
@@ -1385,6 +1422,70 @@ def test_merge_observations_unions_overrides_lists():
     }
     # Each parent should appear exactly once.
     assert len(merged) == 3
+
+
+def test_merge_observations_preserves_no_default_for_args_lacking_defaults():
+    """Regression: ``merge_observations`` was converting a no-default arg
+    (``arg.default = Python None``) into a None-typed default
+    (``arg.default = NoneTypeInfo``) when the rebuild path triggered,
+    because the rebuild used ``TypeInfo.from_set({}, empty_is_none=True)``
+    which returns ``NoneTypeInfo`` for an empty set. The bogus
+    ``NoneTypeInfo`` default then propagated into the emitted annotation
+    as a spurious ``| None`` union member.
+
+    For an arg that has no recorded default in *either* observation set,
+    the merged default must remain Python ``None`` (the "no default
+    information" sentinel) — the rebuild must not invent a None default
+    from the absence of one.
+
+    Concretely modelled on ``tqdm_asyncio.as_completed`` where
+    ``cls``/``fs``/``tqdm_kwargs`` have no defaults and ``loop``/
+    ``timeout``/``total`` have ``=None``: the disagreement on the latter
+    forces ``args1 != args2``, triggers the rebuild, and the bug then
+    invented ``NoneTypeInfo`` defaults for the former.
+    """
+    from righttyper.observations import Observations, FuncInfo, ArgInfo
+    from righttyper.typeinfo import NoneTypeInfo
+    from righttyper.righttyper_types import (
+        ArgumentName, CodeId, Filename, FunctionName,
+    )
+
+    fid = CodeId(Filename("m.py"), FunctionName("f"), 1, 0)
+    # obs1: ``f(fs, loop)`` — neither arg has default information
+    # (pytest-like observation where defaults weren't captured).
+    args1 = (
+        ArgInfo(ArgumentName("fs"), None),
+        ArgInfo(ArgumentName("loop"), None),
+    )
+    # obs2: ``f(fs, loop=None)`` — same fs (no default), but loop has
+    # a ``=None`` default (NoneTypeInfo) recorded.
+    args2 = (
+        ArgInfo(ArgumentName("fs"), None),
+        ArgInfo(ArgumentName("loop"), NoneTypeInfo),
+    )
+
+    obs1 = Observations()
+    obs1.func_info[fid] = FuncInfo(
+        code_id=fid, args=args1, varargs=None, kwargs=None,
+    )
+    obs2 = Observations()
+    obs2.func_info[fid] = FuncInfo(
+        code_id=fid, args=args2, varargs=None, kwargs=None,
+    )
+
+    obs1.merge_observations(obs2)
+    merged_fs = obs1.func_info[fid].args[0]
+    assert merged_fs.arg_name == "fs"
+    assert merged_fs.default is None, (
+        f"fs had no recorded default in either observation; merge must "
+        f"preserve that as Python None (the no-default sentinel). Got "
+        f"{merged_fs.default!r}."
+    )
+
+    # loop should still report NoneTypeInfo (its ``=None`` default).
+    merged_loop = obs1.func_info[fid].args[1]
+    assert merged_loop.arg_name == "loop"
+    assert merged_loop.default is NoneTypeInfo
 
 
 def test_merge_observations_aborts_on_line_shifted_twin():

@@ -3198,6 +3198,11 @@ def test_varargs():
 
 
 def test_varargs_empty():
+    """If a function is only ever observed with empty ``*args``, RT has
+    no element-type observations to emit — leave ``*args`` unannotated.
+    (Previously RT emitted ``*args: None``, which read as "the element
+    type is None" — meaningless, since ``None`` can't be an element of
+    a positional-extras tuple.)"""
     Path("t.py").write_text(textwrap.dedent("""\
         def foo(x, *args):
             pass
@@ -3210,7 +3215,57 @@ def test_varargs_empty():
     output = Path("t.py").read_text()
     code = cst.parse_module(output)
     assert get_function(code, 'foo') == textwrap.dedent("""\
-        def foo(x: bool, *args: None) -> None: ...
+        def foo(x: bool, *args) -> None: ...
+    """)
+
+
+def test_varargs_mixed_empty_and_non_empty_calls():
+    """Regression: when the same function is called with non-empty
+    ``*args`` at one site and empty ``*args`` at another, the emitted
+    annotation must be just the element-type union (here ``int``) — not
+    ``int | None``.
+
+    The bug: the recorder used ``TypeInfo.from_set(elem_types,
+    empty_is_none=True)`` to compute the per-call varargs element type,
+    so a call with zero extras contributed ``NoneTypeInfo`` to the union.
+    When merged with non-empty calls' real-type observations, the
+    emitted annotation came out as ``int | None``, with the ``None``
+    being a sampling artifact rather than a real caller-supplied type."""
+    Path("t.py").write_text(textwrap.dedent("""\
+        def foo(x, *args):
+            pass
+
+        foo(True, 1)
+        foo(True)
+        """
+    ))
+
+    rt_run('t.py')
+    output = Path("t.py").read_text()
+    code = cst.parse_module(output)
+    assert get_function(code, 'foo') == textwrap.dedent("""\
+        def foo(x: bool, *args: int) -> None: ...
+    """)
+
+
+def test_kwargs_mixed_empty_and_non_empty_calls():
+    """Same shape as test_varargs_mixed_empty_and_non_empty_calls but
+    for ``**kwargs``: a call with empty kwargs must not contribute
+    ``None`` to the kwargs value-type union."""
+    Path("t.py").write_text(textwrap.dedent("""\
+        def foo(x, **kwargs):
+            pass
+
+        foo(True, a=1)
+        foo(True)
+        """
+    ))
+
+    rt_run('t.py')
+    output = Path("t.py").read_text()
+    code = cst.parse_module(output)
+    assert get_function(code, 'foo') == textwrap.dedent("""\
+        def foo(x: bool, **kwargs: int) -> None: ...
     """)
 
 
@@ -3251,6 +3306,9 @@ def test_kwargs():
 
 
 def test_kwargs_empty():
+    """Analog of test_varargs_empty for ``**kwargs``: no kwargs ever
+    observed → leave the slot unannotated rather than emit the
+    meaningless ``**kwargs: None``."""
     Path("t.py").write_text(textwrap.dedent("""\
         def foo(x, **kwargs):
             pass
@@ -3263,7 +3321,7 @@ def test_kwargs_empty():
     output = Path("t.py").read_text()
     code = cst.parse_module(output)
     assert get_function(code, 'foo') == textwrap.dedent("""\
-        def foo(x: bool, **kwargs: None) -> None: ...
+        def foo(x: bool, **kwargs) -> None: ...
     """)
 
 
