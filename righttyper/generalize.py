@@ -231,8 +231,15 @@ def lub(
                 is_covariant = issubclass(a.type_obj, _COVARIANT_TYPES) or a.type_obj is type
                 if for_variable or is_covariant:
                     can_merge = all(
-                        (isinstance(aa, TypeInfo) and isinstance(ba, TypeInfo))
-                        or aa is ba
+                        aa is ba or (
+                            isinstance(aa, TypeInfo) and isinstance(ba, TypeInfo)
+                            # ListTypeInfo (Callable's parameter list) only
+                            # merges cleanly when the arities match; otherwise
+                            # the elementwise lub yields a list-union that
+                            # renders as Callable[[A]|[B], R] — invalid syntax.
+                            and not (aa.is_list() and ba.is_list()
+                                     and len(aa.args) != len(ba.args))
+                        )
                         for aa, ba in zip(a.args, b.args)
                     )
                     if can_merge:

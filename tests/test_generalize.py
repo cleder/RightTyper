@@ -1495,6 +1495,23 @@ def test_lub_callable_different_params():
     assert result.to_set() == {a, b}
 
 
+def test_lub_callable_different_arities_for_variable():
+    """lub(Callable[[int], int], Callable[[int, int], int], for_variable=True)
+    must stay a union of two Callables. Element-wise merging would push the
+    union INSIDE the parameter list (``Callable[[int, int]|[int], int]``),
+    which is not a valid type expression."""
+    import collections.abc
+    from righttyper.generalize import lub
+    int_t = TypeInfo.from_type(int)
+    a = TypeInfo.from_type(collections.abc.Callable).replace(
+        args=(TypeInfo.list([int_t]), int_t))
+    b = TypeInfo.from_type(collections.abc.Callable).replace(
+        args=(TypeInfo.list([int_t, int_t]), int_t))
+    result = lub(a, b, for_variable=True)
+    assert result.is_union()
+    assert result.to_set() == {a, b}
+
+
 def test_lub_callable_ellipsis_params():
     """lub(Callable[..., int], Callable[..., str]) merges return types."""
     import collections.abc
