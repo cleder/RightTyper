@@ -1603,6 +1603,43 @@ def test_lub_bare_reversible_subsumes_parametrized():
     assert lub(parametrized, bare) == bare
 
 
+def test_lub_parametrized_mro_subtype_collapses_to_common_ancestor():
+    """``lub(list[X], Iterable[X])`` should return ``Iterable[X]``: ``list``
+    is a subclass of ``Iterable`` and Iterable is covariant in its arg,
+    so the union collapses to the common supertype.
+
+    Currently the existing rules don't fire: Rule 4 requires bare types,
+    Rule 5c requires same outer type, Rule 6 requires one side empty,
+    Rule 7 requires non-generic types. Different-outer parametrized
+    types fall through to a union — even when one is an MRO subclass
+    of the other and the args agree at the common ancestor."""
+    from righttyper.generalize import lub
+    import collections.abc as abc
+
+    INT = TypeInfo.from_type(int)
+    list_int = TypeInfo.from_type(list, args=(INT,))
+    iterable_int = TypeInfo.from_type(abc.Iterable, args=(INT,))
+
+    assert lub(list_int, iterable_int) == iterable_int
+    assert lub(iterable_int, list_int) == iterable_int
+
+
+def test_lub_parametrized_mro_subtype_with_arg_merging():
+    """When the args differ, ``lub(list[bool], Iterable[int])`` should
+    return ``Iterable[lub(bool, int)] == Iterable[int]`` — the common
+    ancestor with covariantly-merged args."""
+    from righttyper.generalize import lub
+    import collections.abc as abc
+
+    BOOL = TypeInfo.from_type(bool)
+    INT = TypeInfo.from_type(int)
+    list_bool = TypeInfo.from_type(list, args=(BOOL,))
+    iterable_int = TypeInfo.from_type(abc.Iterable, args=(INT,))
+    iterable_int_again = TypeInfo.from_type(abc.Iterable, args=(INT,))
+
+    assert lub(list_bool, iterable_int) == iterable_int_again
+
+
 def test_is_private_type():
     """Types in private modules without public re-export should be detected."""
     from righttyper.generalize import _is_private_type

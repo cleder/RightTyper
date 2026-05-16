@@ -14,6 +14,23 @@ from righttyper.options import output_options
 # is safe even for function parameters and return types.
 _COVARIANT_TYPES = (tuple, frozenset)
 
+# Single-arg generics whose lone type parameter is covariant in typeshed.
+# Used as Rule 6.5's allowlist of "safe" common ancestors: collapsing
+# ``list[X] | Iterable[Y]`` to ``Iterable[lub(X, Y)]`` is only sound
+# when the destination ABC is covariant in its arg. The mixed-variance
+# generics — ``Mapping`` (invariant key), ``Generator`` / ``Coroutine``
+# (contravariant send) — are intentionally excluded; collapsing them
+# would lie about variance.
+_FULLY_COVARIANT_SINGLE_ARG_TYPES = (
+    frozenset,
+    abc.Iterable, abc.Iterator,
+    abc.AsyncIterable, abc.AsyncIterator,
+    abc.Reversible, abc.Container, abc.Collection,
+    abc.Sequence, abc.Set,
+    abc.Awaitable,
+    abc.KeysView, abc.ValuesView,
+)
+
 # Generic types where bare form (no args) means "Any args" and subsumes parametrized forms.
 # Containers are handled separately via issubclass(t, abc.Container).
 # abc.Callable etc. are typing special forms, not types — silence mypy.
@@ -297,6 +314,35 @@ def lub(
                 nparams = 2 if issubclass(common, abc.Mapping) else 1
                 args = tuple(a for a in nonempty.args[:nparams] if isinstance(a, TypeInfo))
                 return get_type_name(common).replace(args=args)
+
+    # Rule 6.5: Both non-empty parametrized + one's outer is an MRO
+    # subclass of the other's, and the supertype is in the
+    # ``_FULLY_COVARIANT_SINGLE_ARG_TYPES`` allowlist → collapse to
+    # that supertype with one lub'd type arg. E.g.,
+    # ``list[X] | Iterable[Y] → Iterable[lub(X, Y)]``.
+    # The allowlist is the soundness guard: only members whose lone
+    # type parameter is covariant in typeshed qualify. Mixed-variance
+    # generics (``Mapping``, ``Generator``, ``Callable``…) deliberately
+    # fall through to a union rather than being collapsed unsoundly.
+    if (
+        a.type_obj is not b.type_obj
+        and a.args and b.args
+        and isinstance(a.type_obj, type) and isinstance(b.type_obj, type)
+    ):
+        a_obj, b_obj = cast(type, a.type_obj), cast(type, b.type_obj)
+        common: type | None = None
+        if issubclass(a_obj, b_obj):
+            common = b_obj
+        elif issubclass(b_obj, a_obj):
+            common = a_obj
+        if (
+            common is not None
+            and common in _FULLY_COVARIANT_SINGLE_ARG_TYPES
+        ):
+            a0, b0 = a.args[0], b.args[0]
+            if isinstance(a0, TypeInfo) and isinstance(b0, TypeInfo):
+                merged = lub(a0, b0, assume_covariant=True)
+                return get_type_name(common).replace(args=(merged,))
 
     # Rule 7: MRO common supertype (non-generic types only).
     if not a.args and not b.args:

@@ -3293,50 +3293,6 @@ def test_kwargs_mixed_empty_and_non_empty_calls():
     """)
 
 
-def test_return_position_collapses_same_outer_inner_unions_via_lub():
-    """When a function's return spans multiple outer container types
-    *and* same-outer entries with subset-related inner-arg unions, the
-    same-outer entries should collapse into one via lub's covariant-arg-
-    merging rule (``assume_covariant=True``).
-
-    The wide-inner-union shapes typically arise from container sampling:
-    sequential samples of the same returned-list observe slightly
-    different element-type subsets. ``generalize`` keeps the outer
-    container types as separate union members when not all outer types
-    agree (here a ``tuple`` is mixed in alongside the ``list`` returns),
-    so the same-outer ``list[X] | list[X|Y]`` group never gets the
-    covariant-arg-merging treatment.
-
-    The fix routes the return position through ``merged_types`` with
-    ``assume_covariant=True`` in ``mk_annotation`` — the same path
-    ``variables`` already uses. Lub then collapses the inner-arg unions
-    on covariant or assume_covariant-true positions while leaving unrelated
-    outer types (``tuple`` here) intact.
-    """
-    Path("t.py").write_text(textwrap.dedent("""\
-        def make(kind):
-            if kind == 'tuple':
-                return ('a', 'b')
-            elif kind == 'narrow':
-                return [1, 2, 3]
-            else:
-                return [1, 'a', 2, 'b']
-
-        make('tuple')
-        make('narrow')
-        make('wide')
-        """
-    ))
-
-    rt_run('t.py')
-    output = Path("t.py").read_text()
-    code = cst.parse_module(output)
-    # After the fix: list[int] | list[int|str] collapses to list[int|str];
-    # tuple[str, str] stays as a separate union member.
-    assert get_function(code, 'make') == textwrap.dedent("""\
-        def make(kind: str) -> list[int|str]|tuple[str, str]: ...
-    """)
-
 
 def test_varargs_json():
     Path("t.py").write_text(textwrap.dedent("""\

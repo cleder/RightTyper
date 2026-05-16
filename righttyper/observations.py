@@ -977,15 +977,8 @@ class Observations:
             for var_name, var_types in func_info.variables.items()
         }
 
-        # Re-process the return-position type through ``merged_types`` with
-        # ``assume_covariant=True``: return values are produced by the
-        # function (not invariant input slots), so lub's covariant-arg-
-        # merging rule can collapse ``list[X] | list[X|Y]``-style refinement
-        # fragments that ``generalize`` left intact when the surrounding
-        # union also had outer-container heterogeneity (e.g. a ``tuple``
-        # mixed in alongside ``list`` returns).
         retval = _apply_constructor_type(
-            merged_types(signature[-1].to_set(), assume_covariant=True),
+            signature[-1],
             func_info.constructor_types.get(RETURN_CONSTRUCTOR_KEY, set()),
         )
 
