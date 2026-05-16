@@ -144,13 +144,21 @@ def _is_subtype(a: type, b: type) -> bool:
 def lub(
     a: TypeInfo,
     b: TypeInfo,
-    for_variable: bool = False,
+    assume_covariant: bool = False,
     accessed_attributes: set[str] | None = None,
 ) -> TypeInfo:
     """Compute the least upper bound (most specific common supertype) of two types.
 
     Returns a single TypeInfo that contains both a and b. Falls back to
     a union (a | b) when no better merge is available.
+
+    ``assume_covariant=True`` tells lub to treat ordinarily-invariant
+    containers (``list``, ``dict``, ``set``) as if they were covariant
+    for the purpose of arg-merging — so ``lub(list[X], list[Y])`` becomes
+    ``list[lub(X, Y)]`` instead of leaving the union ``list[X] | list[Y]``
+    intact. Use it when the type being computed describes a value being
+    produced (return values, locals) rather than a slot that has to
+    accept caller-supplied values invariantly (function parameters).
     """
     # Rule 1: Identity
     if a == b:
@@ -229,7 +237,7 @@ def lub(
             if len(a.args) == len(b.args):
                 # type[X] is covariant (type[B] <: type[A] when B <: A)
                 is_covariant = issubclass(a.type_obj, _COVARIANT_TYPES) or a.type_obj is type
-                if for_variable or is_covariant:
+                if assume_covariant or is_covariant:
                     can_merge = all(
                         aa is ba or (
                             isinstance(aa, TypeInfo) and isinstance(ba, TypeInfo)
@@ -244,7 +252,7 @@ def lub(
                     )
                     if can_merge:
                         merged_args = tuple(
-                            lub(cast(TypeInfo, aa), cast(TypeInfo, ba), for_variable=True)
+                            lub(cast(TypeInfo, aa), cast(TypeInfo, ba), assume_covariant=True)
                             if isinstance(aa, TypeInfo) and isinstance(ba, TypeInfo)
                             else aa
                             for aa, ba in zip(a.args, b.args)
@@ -339,9 +347,9 @@ def lub(
                         or issubclass(b.type_obj, _COVARIANT_TYPES)
                         or a.type_obj is type or b.type_obj is type
                     )
-                    if for_variable or either_immutable:
+                    if assume_covariant or either_immutable:
                         merged_args = tuple(
-                            lub(a_ti[i], b_ti[i], for_variable=True)
+                            lub(a_ti[i], b_ti[i], assume_covariant=True)
                             for i in range(n)
                         )
                         return get_type_name(best).replace(args=merged_args)
@@ -358,7 +366,7 @@ def lub(
 
 def _merge_set(
     typeinfoset: set[TypeInfo],
-    for_variable: bool = False,
+    assume_covariant: bool = False,
     accessed_attributes: set[str] | None = None,
 ) -> TypeInfo:
     """Reduce a set of types using pairwise lub, then form the final union."""
@@ -418,7 +426,7 @@ def _merge_set(
         while i < len(types):
             j = i + 1
             while j < len(types):
-                merged = lub(types[i], types[j], for_variable, accessed_attributes)
+                merged = lub(types[i], types[j], assume_covariant, accessed_attributes)
                 if not merged.is_union():
                     # lub produced a single type — replace both with it
                     types[i] = merged
@@ -516,7 +524,7 @@ def degenerate_shape(observations: abc.Iterable[TypeInfo]) -> str | None:
 
 def merged_types(
     typeinfoset: set[TypeInfo],
-    for_variable: bool = False,
+    assume_covariant: bool = False,
     accessed_attributes: set[str] | None = None,
 ) -> TypeInfo:
     """Attempts to merge types in a set before forming their union."""
@@ -525,7 +533,7 @@ def merged_types(
         # is gated separately; honor the flag here so callers don't need to.
         if not output_options.use_attribute_simplification:
             accessed_attributes = None
-        return _merge_set(typeinfoset, for_variable, accessed_attributes)
+        return _merge_set(typeinfoset, assume_covariant, accessed_attributes)
     return TypeInfo.from_set(typeinfoset)
 
 

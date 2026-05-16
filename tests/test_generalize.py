@@ -365,7 +365,7 @@ def test_merge_container_supersets_list():
     list_int = TypeInfo.from_type(list).replace(args=(int_t,))
     list_int_str = TypeInfo.from_type(list).replace(args=(TypeInfo.from_set({int_t, str_t}),))
 
-    result = merged_types({list_int, list_int_str}, for_variable=True)
+    result = merged_types({list_int, list_int_str}, assume_covariant=True)
     assert result == list_int_str
 
 
@@ -378,7 +378,7 @@ def test_merge_container_supersets_no_subset():
     list_int = TypeInfo.from_type(list).replace(args=(int_t,))
     list_str = TypeInfo.from_type(list).replace(args=(str_t,))
 
-    result = merged_types({list_int, list_str}, for_variable=True)
+    result = merged_types({list_int, list_str}, assume_covariant=True)
     assert result == TypeInfo.from_type(list).replace(args=(TypeInfo.from_set({int_t, str_t}),))
 
 
@@ -394,7 +394,7 @@ def test_merge_container_supersets_chain():
     list_int_str = TypeInfo.from_type(list).replace(args=(TypeInfo.from_set({int_t, str_t}),))
     list_all = TypeInfo.from_type(list).replace(args=(TypeInfo.from_set({int_t, str_t, float_t}),))
 
-    result = merged_types({list_int, list_int_str, list_all}, for_variable=True)
+    result = merged_types({list_int, list_int_str, list_all}, assume_covariant=True)
     assert result == list_all
 
 
@@ -409,7 +409,7 @@ def test_merge_container_supersets_nested():
     list_set_int = TypeInfo.from_type(list).replace(args=(set_int,))
     list_set_int_str = TypeInfo.from_type(list).replace(args=(set_int_str,))
 
-    result = merged_types({list_set_int, list_set_int_str}, for_variable=True)
+    result = merged_types({list_set_int, list_set_int_str}, assume_covariant=True)
     assert result == list_set_int_str
 
 
@@ -424,7 +424,7 @@ def test_merge_container_supersets_dict():
     dict_str_int = TypeInfo.from_type(dict).replace(args=(str_t, int_t))
     dict_str_int_float = TypeInfo.from_type(dict).replace(args=(str_t, TypeInfo.from_set({int_t, float_t})))
 
-    result = merged_types({dict_str_int, dict_str_int_float}, for_variable=True)
+    result = merged_types({dict_str_int, dict_str_int_float}, assume_covariant=True)
     assert result == dict_str_int_float
 
 
@@ -438,7 +438,7 @@ def test_merge_container_supersets_dict_no_subset():
     dict_str_int = TypeInfo.from_type(dict).replace(args=(str_t, int_t))
     dict_int_int = TypeInfo.from_type(dict).replace(args=(int_t, int_t))
 
-    result = merged_types({dict_str_int, dict_int_int}, for_variable=True)
+    result = merged_types({dict_str_int, dict_int_int}, assume_covariant=True)
     assert result == TypeInfo.from_type(dict).replace(args=(TypeInfo.from_set({str_t, int_t}), int_t))
 
 
@@ -452,7 +452,7 @@ def test_merge_container_supersets_dict_key_subset():
     dict_str_int = TypeInfo.from_type(dict).replace(args=(str_t, int_t))
     dict_str_or_int_int = TypeInfo.from_type(dict).replace(args=(TypeInfo.from_set({str_t, int_t}), int_t))
 
-    result = merged_types({dict_str_int, dict_str_or_int_int}, for_variable=True)
+    result = merged_types({dict_str_int, dict_str_or_int_int}, assume_covariant=True)
     assert result == dict_str_or_int_int
 
 
@@ -466,7 +466,7 @@ def test_merge_container_supersets_mixed_containers():
     list_int_str = TypeInfo.from_type(list).replace(args=(TypeInfo.from_set({int_t, str_t}),))
     set_int = TypeInfo.from_type(set).replace(args=(int_t,))
 
-    result = merged_types({list_int, set_int, list_int_str}, for_variable=True)
+    result = merged_types({list_int, set_int, list_int_str}, assume_covariant=True)
     assert result == TypeInfo.from_set({set_int, list_int_str})
 
 
@@ -481,7 +481,7 @@ def test_merge_covariant_tuple():
     tuple_int = TypeInfo.from_type(tuple).replace(args=(int_t,))
     tuple_bool = TypeInfo.from_type(tuple).replace(args=(bool_t,))
 
-    result = merged_types({tuple_int, tuple_bool}, for_variable=False)
+    result = merged_types({tuple_int, tuple_bool}, assume_covariant=False)
     assert result == TypeInfo.from_type(tuple).replace(args=(int_t,))
 
 
@@ -496,7 +496,7 @@ def test_merge_covariant_tuple_multi_arg():
     tuple_is = TypeInfo.from_type(tuple).replace(args=(int_t, str_t))
     tuple_fs = TypeInfo.from_type(tuple).replace(args=(float_t, str_t))
 
-    result = merged_types({tuple_is, tuple_fs}, for_variable=False)
+    result = merged_types({tuple_is, tuple_fs}, assume_covariant=False)
     # int|float simplifies to float via PEP 3141 numeric tower
     expected = TypeInfo.from_type(tuple).replace(args=(float_t, str_t))
     assert result == expected
@@ -511,7 +511,7 @@ def test_merge_covariant_tuple_varlen():
     tuple_int_var = TypeInfo.from_type(tuple).replace(args=(int_t, Ellipsis))
     tuple_str_var = TypeInfo.from_type(tuple).replace(args=(str_t, Ellipsis))
 
-    result = merged_types({tuple_int_var, tuple_str_var}, for_variable=False)
+    result = merged_types({tuple_int_var, tuple_str_var}, assume_covariant=False)
     expected = TypeInfo.from_type(tuple).replace(
         args=(TypeInfo.from_set({int_t, str_t}), Ellipsis)
     )
@@ -527,7 +527,7 @@ def test_merge_covariant_frozenset():
     fs_int = TypeInfo.from_type(frozenset).replace(args=(int_t,))
     fs_str = TypeInfo.from_type(frozenset).replace(args=(str_t,))
 
-    result = merged_types({fs_int, fs_str}, for_variable=False)
+    result = merged_types({fs_int, fs_str}, assume_covariant=False)
     expected = TypeInfo.from_type(frozenset).replace(
         args=(TypeInfo.from_set({int_t, str_t}),)
     )
@@ -548,7 +548,7 @@ def test_merge_covariant_tuple_different_lengths():
     tuple_1 = TypeInfo.from_type(tuple).replace(args=(int_t,))
     tuple_2 = TypeInfo.from_type(tuple).replace(args=(int_t, str_t))
 
-    result = merged_types({tuple_1, tuple_2}, for_variable=False)
+    result = merged_types({tuple_1, tuple_2}, assume_covariant=False)
     assert result == TypeInfo.from_type(tuple).replace(
         args=(TypeInfo.from_set({int_t, str_t}), Ellipsis)
     )
@@ -563,7 +563,7 @@ def test_merge_covariant_tuple_fixed_vs_varlen():
     tuple_fixed = TypeInfo.from_type(tuple).replace(args=(int_t, str_t))
     tuple_var = TypeInfo.from_type(tuple).replace(args=(int_t, Ellipsis))
 
-    result = merged_types({tuple_fixed, tuple_var}, for_variable=False)
+    result = merged_types({tuple_fixed, tuple_var}, assume_covariant=False)
     assert result == TypeInfo.from_set({tuple_fixed, tuple_var})
 
 
@@ -576,7 +576,7 @@ def test_merge_invariant_list_unchanged():
     list_int = TypeInfo.from_type(list).replace(args=(int_t,))
     list_str = TypeInfo.from_type(list).replace(args=(str_t,))
 
-    result = merged_types({list_int, list_str}, for_variable=False)
+    result = merged_types({list_int, list_str}, assume_covariant=False)
     assert result == TypeInfo.from_set({list_int, list_str})
 
 
@@ -590,7 +590,7 @@ def test_subsume_fixed_by_varlen_tuple():
     tuple_fixed = TypeInfo.from_type(tuple).replace(args=(int_t, int_t))
     tuple_var = TypeInfo.from_type(tuple).replace(args=(int_t, Ellipsis))
 
-    result = merged_types({tuple_fixed, tuple_var}, for_variable=False)
+    result = merged_types({tuple_fixed, tuple_var}, assume_covariant=False)
     assert result == tuple_var
 
 
@@ -603,7 +603,7 @@ def test_no_subsume_fixed_by_varlen_tuple():
     tuple_fixed = TypeInfo.from_type(tuple).replace(args=(int_t, str_t))
     tuple_var = TypeInfo.from_type(tuple).replace(args=(int_t, Ellipsis))
 
-    result = merged_types({tuple_fixed, tuple_var}, for_variable=False)
+    result = merged_types({tuple_fixed, tuple_var}, assume_covariant=False)
     assert result == TypeInfo.from_set({tuple_fixed, tuple_var})
 
 
@@ -617,7 +617,7 @@ def test_subsume_fixed_by_varlen_tuple_union_elem():
     tuple_fixed = TypeInfo.from_type(tuple).replace(args=(int_t, str_t))
     tuple_var = TypeInfo.from_type(tuple).replace(args=(int_or_str, Ellipsis))
 
-    result = merged_types({tuple_fixed, tuple_var}, for_variable=False)
+    result = merged_types({tuple_fixed, tuple_var}, assume_covariant=False)
     assert result == tuple_var
 
 
@@ -630,7 +630,7 @@ def test_subsume_multiple_fixed_by_varlen():
     tuple_2 = TypeInfo.from_type(tuple).replace(args=(int_t, int_t))
     tuple_var = TypeInfo.from_type(tuple).replace(args=(int_t, Ellipsis))
 
-    result = merged_types({tuple_1, tuple_2, tuple_var}, for_variable=False)
+    result = merged_types({tuple_1, tuple_2, tuple_var}, assume_covariant=False)
     assert result == tuple_var
 
 
@@ -642,7 +642,7 @@ def test_subsume_empty_tuple_by_varlen():
     tuple_empty = TypeInfo.from_type(tuple).replace(args=((),))
     tuple_var = TypeInfo.from_type(tuple).replace(args=(int_t, Ellipsis))
 
-    result = merged_types({tuple_empty, tuple_var}, for_variable=False)
+    result = merged_types({tuple_empty, tuple_var}, assume_covariant=False)
     assert result == tuple_var
 
 
@@ -934,49 +934,49 @@ def test_lub_no_common_base():
     assert types == {int, str}
 
 
-def test_lub_same_container_merge_for_variable():
-    """lub(list[int], list[str]) = list[int|str] when for_variable=True."""
+def test_lub_same_container_merge_assume_covariant():
+    """lub(list[int], list[str]) = list[int|str] when assume_covariant=True."""
     from righttyper.generalize import lub
     int_t = TypeInfo.from_type(int)
     str_t = TypeInfo.from_type(str)
     a = TypeInfo.from_type(list).replace(args=(int_t,))
     b = TypeInfo.from_type(list).replace(args=(str_t,))
-    result = lub(a, b, for_variable=True)
+    result = lub(a, b, assume_covariant=True)
     assert result.type_obj is list
     assert result.args and isinstance(result.args[0], TypeInfo)
     assert _ti(result.args[0]).is_union()
 
 
 def test_lub_same_container_no_merge_invariant():
-    """lub(list[int], list[str]) = list[int]|list[str] when for_variable=False (invariant)."""
+    """lub(list[int], list[str]) = list[int]|list[str] when assume_covariant=False (invariant)."""
     from righttyper.generalize import lub
     int_t = TypeInfo.from_type(int)
     str_t = TypeInfo.from_type(str)
     a = TypeInfo.from_type(list).replace(args=(int_t,))
     b = TypeInfo.from_type(list).replace(args=(str_t,))
-    result = lub(a, b, for_variable=False)
+    result = lub(a, b, assume_covariant=False)
     assert result.is_union()
     assert result.to_set() == {a, b}
 
 
 def test_lub_same_container_subtype_args():
-    """lub(list[bool], list[int]) = list[int] when for_variable=True (bool <: int)."""
+    """lub(list[bool], list[int]) = list[int] when assume_covariant=True (bool <: int)."""
     from righttyper.generalize import lub
     a = TypeInfo.from_type(list).replace(args=(TypeInfo.from_type(bool),))
     b = TypeInfo.from_type(list).replace(args=(TypeInfo.from_type(int),))
-    result = lub(a, b, for_variable=True)
+    result = lub(a, b, assume_covariant=True)
     assert result.type_obj is list
     assert _ti(result.args[0]).type_obj is int
 
 
 def test_lub_covariant_tuple_always_merges():
-    """lub(tuple[int,...], tuple[str,...]) = tuple[int|str,...] even for_variable=False."""
+    """lub(tuple[int,...], tuple[str,...]) = tuple[int|str,...] even assume_covariant=False."""
     from righttyper.generalize import lub
     int_t = TypeInfo.from_type(int)
     str_t = TypeInfo.from_type(str)
     a = TypeInfo.from_type(tuple).replace(args=(int_t, Ellipsis))
     b = TypeInfo.from_type(tuple).replace(args=(str_t, Ellipsis))
-    result = lub(a, b, for_variable=False)
+    result = lub(a, b, assume_covariant=False)
     assert result.type_obj is tuple
     assert _ti(result.args[0]).is_union()
 
@@ -1289,11 +1289,11 @@ def test_lub_fixed_tuple_same_length_merge():
 
 
 def test_lub_multiple_lists_merge_args():
-    """list[int] | list[str] → list[int|str] when for_variable=True."""
+    """list[int] | list[str] → list[int|str] when assume_covariant=True."""
     from righttyper.generalize import lub
     a = TypeInfo.from_type(list).replace(args=(TypeInfo.from_type(int),))
     b = TypeInfo.from_type(list).replace(args=(TypeInfo.from_type(str),))
-    result = lub(a, b, for_variable=True)
+    result = lub(a, b, assume_covariant=True)
     assert result.type_obj is list
     assert _ti(result.args[0]).is_union()
     assert _ti(result.args[0]).to_set() == {TypeInfo.from_type(int), TypeInfo.from_type(str)}
@@ -1346,26 +1346,26 @@ def test_lub_abc_cross_container_same_args():
 
 
 def test_lub_abc_cross_container_different_args_invariant():
-    """lub(list[int], set[str]) stays as union when for_variable=False (invariant)."""
+    """lub(list[int], set[str]) stays as union when assume_covariant=False (invariant)."""
     from righttyper.generalize import lub
 
     a = TypeInfo.from_type(list).replace(args=(TypeInfo.from_type(int),))
     b = TypeInfo.from_type(set).replace(args=(TypeInfo.from_type(str),))
 
-    result = lub(a, b, for_variable=False, accessed_attributes={"__iter__"})
+    result = lub(a, b, assume_covariant=False, accessed_attributes={"__iter__"})
     assert result.is_union()
     assert result.to_set() == {a, b}
 
 
-def test_lub_abc_cross_container_different_args_for_variable():
-    """lub(list[int], set[str]) merges args when for_variable=True."""
+def test_lub_abc_cross_container_different_args_assume_covariant():
+    """lub(list[int], set[str]) merges args when assume_covariant=True."""
     import collections.abc
     from righttyper.generalize import lub
 
     a = TypeInfo.from_type(list).replace(args=(TypeInfo.from_type(int),))
     b = TypeInfo.from_type(set).replace(args=(TypeInfo.from_type(str),))
 
-    result = lub(a, b, for_variable=True, accessed_attributes={"__iter__"})
+    result = lub(a, b, assume_covariant=True, accessed_attributes={"__iter__"})
     assert not result.is_union()
     assert isinstance(result.type_obj, type)
     assert issubclass(result.type_obj, collections.abc.Iterable)
@@ -1466,7 +1466,7 @@ def test_lub_callable_different_return():
         args=(TypeInfo.list([int_t]), int_t))
     b = TypeInfo.from_type(collections.abc.Callable).replace(
         args=(TypeInfo.list([int_t]), str_t))
-    result = lub(a, b, for_variable=True)
+    result = lub(a, b, assume_covariant=True)
     # Same params, different return → merge return to int|str
     assert result.type_obj is collections.abc.Callable
     assert not result.is_union()
@@ -1495,8 +1495,8 @@ def test_lub_callable_different_params():
     assert result.to_set() == {a, b}
 
 
-def test_lub_callable_different_arities_for_variable():
-    """lub(Callable[[int], int], Callable[[int, int], int], for_variable=True)
+def test_lub_callable_different_arities_assume_covariant():
+    """lub(Callable[[int], int], Callable[[int, int], int], assume_covariant=True)
     must stay a union of two Callables. Element-wise merging would push the
     union INSIDE the parameter list (``Callable[[int, int]|[int], int]``),
     which is not a valid type expression."""
@@ -1507,7 +1507,7 @@ def test_lub_callable_different_arities_for_variable():
         args=(TypeInfo.list([int_t]), int_t))
     b = TypeInfo.from_type(collections.abc.Callable).replace(
         args=(TypeInfo.list([int_t, int_t]), int_t))
-    result = lub(a, b, for_variable=True)
+    result = lub(a, b, assume_covariant=True)
     assert result.is_union()
     assert result.to_set() == {a, b}
 
@@ -1520,7 +1520,7 @@ def test_lub_callable_ellipsis_params():
     str_t = TypeInfo.from_type(str)
     a = TypeInfo.from_type(collections.abc.Callable).replace(args=(..., int_t))
     b = TypeInfo.from_type(collections.abc.Callable).replace(args=(..., str_t))
-    result = lub(a, b, for_variable=True)
+    result = lub(a, b, assume_covariant=True)
     assert result.type_obj is collections.abc.Callable
     assert not result.is_union()
     assert result.args[0] is ...
