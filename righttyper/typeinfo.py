@@ -46,6 +46,16 @@ class TypeInfo:
     # Multiple can occur in a function call, in different order, so include in comparisons.
     typevar_index: int = field(default=0, compare=True)
 
+    # ``id()`` of the Python container that produced this TypeInfo, when
+    # one was sampled (set in the relevant ``_handle_*`` handlers in
+    # ``type_id``).  Excluded from comparison so two TypeInfos with the
+    # same shape but different container ids still hash/eq equal in
+    # ``Counter[CallTrace]`` dedup.  Consumed at recording end by the
+    # transformer that rewrites trace TypeInfos to each container's
+    # resolved-latest snapshot from ``ContainerTypeCache``; cleared post-
+    # rewrite (so it never reaches the ``.rt`` pickle).
+    container_id: int | None = field(default=None, compare=False)
+
 
     @staticmethod
     def _arg2str(a: TypeInfoArg, modifier: Callable[["TypeInfo"], str|None]|None) -> str:
@@ -235,15 +245,25 @@ class TypeInfo:
 
     @staticmethod
     def _strip_type_obj_for_pickle(t: "TypeInfo") -> tuple[Any, ...]:
-        """Pickle reducer that drops `type_obj`.  Registered on the
-        `Pickler.dispatch_table` used to write `.rt` files: without it,
-        the live class reference (often a __main__-defined class) leaks
-        through the round-trip and overrides the canonical (module, name)
-        chosen by `AdjustTypeNamesT`, producing names like
-        `__main__.Foo` at process time.  Walks `fields()` so it stays
-        correct as TypeInfo evolves."""
+        """Pickle reducer that drops ``type_obj`` and ``container_id``.
+        Registered on the ``Pickler.dispatch_table`` used to write
+        ``.rt`` files.
+
+        ``type_obj``: without stripping, the live class reference (often
+        a ``__main__``-defined class) leaks through the round-trip and
+        overrides the canonical ``(module, name)`` chosen by
+        ``AdjustTypeNamesT``, producing names like ``__main__.Foo`` at
+        process time.
+
+        ``container_id``: a transient cid (from
+        ``ContainerSamples.cid``) only meaningful within one recording
+        process — the resolver consumes it before pickle; any leftover
+        values reference an in-memory cache that the process step won't
+        have.  Cleared here for cleanliness.
+
+        Walks ``fields()`` so it stays correct as TypeInfo evolves."""
         return type(t), tuple(
-            None if f.name == 'type_obj' else getattr(t, f.name)
+            None if f.name in ('type_obj', 'container_id') else getattr(t, f.name)
             for f in fields(type(t))
         )
 

@@ -2,13 +2,13 @@ import inspect
 import builtins
 from dataclasses import dataclass, field
 from types import CodeType, FrameType, FunctionType, GeneratorType
-from collections import defaultdict
+from collections import Counter, defaultdict
 import collections.abc as abc
 from pathlib import Path
 import logging
 from righttyper.logger import logger
 from righttyper.righttyper_types import ArgumentName, VariableName, Filename, CodeId, CallableWithCode, cast_not_None
-from righttyper.typeinfo import TypeInfo, NoneTypeInfo, UnknownTypeInfo, CallTrace
+from righttyper.typeinfo import TypeInfo, NoneTypeInfo, UnknownTypeInfo, CallTrace, UnionTypeInfo
 from typing import Final, Any, NewType, overload
 import typing
 from righttyper.observations import Observations, FuncInfo, OverriddenFunction, ArgInfo
@@ -201,6 +201,54 @@ class PendingCallTrace:
         )
 
         return CallTrace(type_data, first_arg_class=self.self_type)
+
+
+class _ResolveContainerSnapshotT(TypeInfo.Transformer):
+    """Rewrites every TypeInfo node carrying a ``container_id`` whose
+    corresponding ``ContainerSamples`` entry is in the by-cid map (built
+    once from the live cache at recording end) with a fresh outer
+    TypeInfo built from that entry's ``resolved_samples()`` view.
+
+    Walks bottom-up via ``super().visit(node)``; the standard union-
+    dedup-after-modification pattern (see ``ResolvingT`` in
+    ``observations.py:443-448``) collapses unions of progressive
+    snapshots into one canonical entry once their members rewrite to
+    the same TypeInfo.
+
+    Evicted cache entries (cid not in the map) are silent no-ops — the
+    original TypeInfo passes through unchanged.  Monotonic cids ensure
+    no id-reuse-after-GC can ever cause a wrong cache hit."""
+
+    def __init__(self, cid_to_entry: "dict[int, Any]") -> None:
+        self._cid_to_entry = cid_to_entry
+
+    def visit(vself, node: TypeInfo) -> TypeInfo:
+        pre = node
+        node = super().visit(node)
+        if (cid := node.container_id) is not None:
+            cache_entry = vself._cid_to_entry.get(cid)
+            if cache_entry is not None:
+                resolved = cache_entry.resolved_samples()
+                inner_args = tuple(
+                    TypeInfo.from_set(set(c)) for c in resolved
+                )
+                if inner_args:
+                    # Source of truth for the outer shape: the cache's
+                    # own held container (``cache_entry.o``).  Avoids
+                    # the ``ti.replace(args=...)`` pitfall when ``ti``
+                    # itself is a Union (whose ``args`` are members,
+                    # not outer-element args).
+                    node = TypeInfo.from_type(
+                        type(cache_entry.o), args=inner_args
+                    )
+        # After modifying inside a union (members rewriting to equal
+        # forms), re-form via ``to_set()`` to dedup — the
+        # ``ResolvingT`` pattern.
+        if pre is not node and isinstance(node, UnionTypeInfo):
+            node = TypeInfo.from_set(
+                node.to_set(), typevar_index=node.typevar_index
+            )
+        return node
 
 
 class ObservationsRecorder:
@@ -802,6 +850,45 @@ class ObservationsRecorder:
                 out[var_name].add(get_type_name(last_class))
 
 
+    def _resolve_container_snapshots(self) -> None:
+        """At recording end, walk every trace and variable TypeInfo with
+        ``_ResolveContainerSnapshotT``, which rewrites nodes carrying
+        ``container_id`` to the resolved-latest snapshot from the live
+        ``ContainerTypeCache``.
+
+        Built from the cache so id-reuse is impossible (cids are
+        monotonic, assigned at ``ContainerSamples`` creation).  Cache-
+        evicted entries (cid no longer in the by-cid map) fall back to
+        the original TypeInfo — sound, just no fix benefit."""
+        from righttyper.type_id import _cache
+
+        cid_to_entry = {e.cid: e for e in _cache._cache.values()}
+        if not cid_to_entry:
+            return
+        tr = _ResolveContainerSnapshotT(cid_to_entry)
+
+        for func_info in self._obs.func_info.values():
+            # Traces: rewrite each position; Counter rebuild collapses
+            # CallTraces that became equal after the rewrite.
+            if func_info.traces:
+                new_traces: Counter[CallTrace] = Counter()
+                for trace, count in func_info.traces.items():
+                    rewritten = tuple(tr.visit(ti) for ti in trace)
+                    if rewritten == tuple(trace):
+                        new_traces[trace] += count
+                    else:
+                        new_traces[CallTrace(
+                            rewritten, first_arg_class=trace.first_arg_class
+                        )] += count
+                func_info.traces = new_traces
+
+            # Variables: set of TypeInfos; rebuild from rewrites.
+            for var_name in list(func_info.variables):
+                func_info.variables[var_name] = {
+                    tr.visit(t) for t in func_info.variables[var_name]
+                }
+
+
     def finish_recording(self, main_globals: dict[str, Any]) -> Observations:
         # Any generators left?
         for code, per_frame in self._pending_traces.items():
@@ -810,6 +897,17 @@ class ObservationsRecorder:
                     # Their frames are no longer reachable here; re-sample
                     # from the PY_START snapshot.
                     self._record_return_type(tr, code, None, tr.arg_info.locals)
+
+        # Rewrite trace positions whose ``arg_ids`` point to a still-live
+        # ``ContainerTypeCache`` entry.  Each call's trace snapshot was
+        # captured at call time, reflecting only the container's
+        # then-cumulative state; the cache has continued to accumulate
+        # samples (across this call's body and subsequent calls).
+        # Rewriting with the cache's resolved-latest collapses progressive
+        # refinement-fragment snapshots of one physical id across traces
+        # to one canonical shape.  Must run while ``_cache`` is still
+        # live, before ``finish_recording`` clears recorder state.
+        self._resolve_container_snapshots()
 
         self._assign_attributes_to_scopes()
 

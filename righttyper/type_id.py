@@ -30,6 +30,7 @@ import types
 from typing import Any, cast, get_type_hints, get_origin, get_args, TypeGuard
 import typing
 
+from righttyper.atomic import AtomicCounter
 from righttyper.random_dict import RandomDict
 from righttyper.typeinfo import TypeInfo, TypeInfoArg, NoneTypeInfo, AnyTypeInfo, UnknownTypeInfo
 from righttyper.righttyper_types import Filename, FunctionName, CodeId, CallableWithCode, has_code
@@ -389,6 +390,14 @@ def _first_referent(value: Any) -> object|None:
     return ref[0] if len(ref) else None
 
 
+# Monotonic counter for ``ContainerSamples.cid``: stable identifiers that,
+# unlike Python's ``id()``, never reuse values for distinct objects.
+# TypeInfos store this cid (as ``container_id``) so the resolve at
+# recording end can't be tricked by id-reuse-after-GC into pulling a
+# different (later-allocated) container's resolved snapshot.
+_cid_counter = AtomicCounter()
+
+
 class ContainerSamples:
     """Tracks type samples from a container for type inference.
 
@@ -398,6 +407,7 @@ class ContainerSamples:
     """
 
     def __init__(self, o: object, n_counters: int):
+        self.cid = _cid_counter.inc()
         self.o = o
         self.n_counters = n_counters
         # Cumulative counters: all types ever seen (for final annotation)
@@ -405,15 +415,122 @@ class ContainerSamples:
         self.last_sampled_size = 0
         # Set by sample_until_stable on Good-Turing convergence
         self.last_singleton_ratios: list[float] = []
+        # Per-counter map ``id(inner) -> (back_ref, Counter of all progressive
+        # snapshots ever stored for this id at this counter)``.  When the
+        # same physical inner container is revisited and its cumulative
+        # contents have grown, ``all_samples`` accumulates progressive
+        # snapshots that look like distinct keys; this map lets
+        # ``resolved_samples()`` collapse them to one resolved-latest
+        # snapshot per id at recording time.  The Counter alongside the
+        # back-ref records exactly which snapshot keys an id contributed,
+        # so ``resolved_samples()`` can subtract them cleanly from
+        # ``all_samples`` and keep scalar entries intact.  ``all_samples``
+        # itself stays untouched during sampling — Good-Turing
+        # (``sample_until_stable``) reads it and needs the per-visit
+        # snapshot keys to estimate when content discovery has converged.
+        self.inner_ids: tuple[dict[int, tuple[object, Counter[TypeInfo]]], ...] = tuple(
+            {} for _ in range(n_counters)
+        )
 
-    def add_sample(self, sample: tuple[TypeInfo, ...]) -> None:
-        """Add a sample to cumulative history."""
+    def _track_inner_ids(self, raw: tuple[Any, ...], sample: tuple[TypeInfo, ...]) -> None:
+        """Record id-keyed snapshot info for any sample element whose
+        TypeInfo carries type arguments — i.e., a parameterized inner
+        whose content could refine over time.  Bare-type elements (no
+        ``args``) have nothing to dedup.  Mirrors
+        ``ContainerTypeCache.get``'s ``e.o is not o`` reuse check: an id
+        whose stored back-ref no longer matches the live object resets
+        the entry."""
+        for i, (raw_v, ti) in enumerate(zip(raw, sample)):
+            if not ti.args:
+                continue
+            v_id = id(raw_v)
+            existing = self.inner_ids[i].get(v_id)
+            if existing is None or existing[0] is not raw_v:
+                existing = (raw_v, Counter())
+                self.inner_ids[i][v_id] = existing
+            existing[1][ti] += 1
+
+    def add_sample(self, sample: tuple[TypeInfo, ...], raw: tuple[Any, ...] | None = None) -> None:
+        """Add a sample to cumulative history.
+
+        When ``raw`` is provided (the original Python values that produced
+        ``sample``), also update ``inner_ids`` so container elements can be
+        deduped by id at resolution time."""
         for c, v in zip(self.all_samples, sample):
             c[v] += 1
+        if raw is not None:
+            self._track_inner_ids(raw, sample)
 
     def has_new_type(self, sample: tuple[TypeInfo, ...]) -> bool:
         """Check if sample contains a type not seen before."""
         return any(v not in counter for v, counter in zip(sample, self.all_samples))
+
+    def resolved_samples(
+        self,
+        _resolving: set[int] | None = None,
+        _resolved: dict[int, "tuple[Counter[TypeInfo], ...]"] | None = None,
+    ) -> tuple[Counter[TypeInfo], ...]:
+        """Per-counter Counter view that collapses progressive snapshots
+        of the same inner-container id to one resolved-latest snapshot
+        derived from the inner's own cumulative state in ``_cache``.
+
+        Bottom-up + memoized: an inner is resolved before being used by
+        its outer.  Falls back to the stored snapshots when the inner's
+        cache entry has been LRU-evicted or its id has been reused for a
+        different object (``e.o`` mismatch).  A cycle in container
+        references (very rare; would have to be created via ``__dict__``
+        or similar) falls back to ``all_samples`` unchanged."""
+        # Short-circuit: no parameterized inners observed at any counter
+        # → nothing to resolve, ``all_samples`` is already canonical.
+        # This is the common case (containers of scalars) and keeps
+        # post-fix overhead at ~zero on the hot path.
+        if not any(self.inner_ids):
+            return self.all_samples
+        if _resolved is None:
+            _resolved = {}
+        if _resolving is None:
+            _resolving = set()
+        my_id = id(self)
+        if my_id in _resolved:
+            return _resolved[my_id]
+        if my_id in _resolving:
+            return self.all_samples
+        _resolving.add(my_id)
+        try:
+            result: tuple[Counter[TypeInfo], ...] = tuple(
+                Counter() for _ in range(self.n_counters)
+            )
+            for i in range(self.n_counters):
+                contributed: Counter[TypeInfo] = Counter()
+                for inner_id, (back_ref, id_counter) in self.inner_ids[i].items():
+                    contributed.update(id_counter)
+                    cache_entry = _cache._cache.get(inner_id)
+                    if cache_entry is not None and cache_entry.o is back_ref:
+                        # Recurse: get the inner's resolved per-counter Counters,
+                        # build the inner's TypeInfo by re-wrapping with the
+                        # outer-shape template (any past snapshot has the right
+                        # module/name/type_obj — the args are what we recompute).
+                        inner_resolved = cache_entry.resolved_samples(_resolving, _resolved)
+                        template = next(iter(id_counter))
+                        inner_args = tuple(
+                            TypeInfo.from_set(set(c)) for c in inner_resolved
+                        )
+                        resolved_snapshot = template.replace(args=inner_args)
+                        result[i][resolved_snapshot] += 1
+                    else:
+                        # Evicted or id-reuse: keep the stored snapshots.
+                        result[i].update(id_counter)
+                # Preserve scalar / non-tracked entries: anything in
+                # all_samples[i] that wasn't contributed by a tracked id.
+                remaining = self.all_samples[i].copy()
+                remaining.subtract(contributed)
+                for ti, cnt in remaining.items():
+                    if cnt > 0:
+                        result[i][ti] += cnt
+            _resolved[my_id] = result
+            return result
+        finally:
+            _resolving.discard(my_id)
 
     def sample_until_stable(self, sampler: abc.Callable[[], tuple[Any, ...]], depth: int) -> str:
         """Sample until Good-Turing indicates stability or the per-container
@@ -441,10 +558,12 @@ class ContainerSamples:
                 )
                 return 'max_limit'
 
-            sample = tuple(get_value_type(v, depth+1) for v in sampler())
-            # Add to cumulative history
+            raw_sample = sampler()
+            sample = tuple(get_value_type(v, depth+1) for v in raw_sample)
+            # Add to cumulative history (and track ids for parameterized inners)
             for c, v in zip(self.all_samples, sample):
                 c[v] += 1
+            self._track_inner_ids(raw_sample, sample)
             # Add to cycle-local counter
             for c, v in zip(cycle_counter, sample):
                 c[v] += 1
@@ -466,10 +585,13 @@ class ContainerSamples:
         """Fully scan a small container."""
         if self.n_counters == 1:
             for v in container:
-                self.add_sample((get_value_type(v, depth+1),))
+                self.add_sample((get_value_type(v, depth+1),), (v,))
         else:
             for k, v in container.items():
-                self.add_sample((get_value_type(k, depth+1), get_value_type(v, depth+1)))
+                self.add_sample(
+                    (get_value_type(k, depth+1), get_value_type(v, depth+1)),
+                    (k, v),
+                )
         self.last_sampled_size = len(container)
 
     def compute_ground_truth(self, container: Any, depth: int) -> tuple[Counter[TypeInfo], ...]:
@@ -536,7 +658,8 @@ def _get_container_args(
                 action = "full_scan"
             elif random.random() < run_options.container_check_probability:
                 # Spot-check: take one sample, rescan if new type found
-                sample = tuple(get_value_type(v, depth+1) for v in sampler())
+                raw_sample = sampler()
+                sample = tuple(get_value_type(v, depth+1) for v in raw_sample)
                 if entry.has_new_type(sample):
                     entry.full_scan(container, depth)
                     action = "spot_check_hit"
@@ -551,9 +674,10 @@ def _get_container_args(
                 action = "sample"
             elif random.random() < run_options.container_check_probability:
                 # Spot-check: resample only if new type found
-                sample = tuple(get_value_type(v, depth+1) for v in sampler())
+                raw_sample = sampler()
+                sample = tuple(get_value_type(v, depth+1) for v in raw_sample)
                 if entry.has_new_type(sample):
-                    entry.add_sample(sample)
+                    entry.add_sample(sample, raw_sample)
                     stopping_reason = entry.sample_until_stable(sampler, depth)
                     entry.last_sampled_size = current_size
                     action = "spot_check_hit"
@@ -561,7 +685,12 @@ def _get_container_args(
                 else:
                     action = "spot_check_miss"
 
-    result = tuple(TypeInfo.from_set(set(c)) for c in entry.all_samples)
+    # ``resolved_samples()`` replaces progressive snapshots of the same
+    # inner-container id with one resolved-latest snapshot built from the
+    # inner's own cumulative cache state (bottom-up).  When the artifact
+    # doesn't apply (no parameterized inners, no growing ids), it returns
+    # the same Counters as ``all_samples``.
+    result = tuple(TypeInfo.from_set(set(c)) for c in entry.resolved_samples())
 
     if run_options.log_sampling and container:
         n_samples_after = entry.all_samples[0].total()
@@ -647,15 +776,23 @@ def _handle_tuple(value: Any, depth: int) -> TypeInfo:
     return TypeInfo.from_type(tuple, args=args)
 
 
+def _cid_for(container: Any) -> int | None:
+    """``ContainerSamples.cid`` for an observed container, or ``None`` if
+    no cache entry is currently mapped to its id (shouldn't happen for
+    a value just sampled by ``_get_container_args``, but defensive)."""
+    e = _cache._cache.get(id(container))
+    return e.cid if e is not None and e.o is container else None
+
+
 def _handle_dict(value: Any, depth: int) -> TypeInfo:
     sampler = lambda: ((el := _random_item(value)), value[el])
     args = _get_container_args(value, 2, sampler, depth)
 
     t: type = type(value)
     if (ti := _BUILTINS.get(t)):
-        return ti.replace(args=args)
+        return ti.replace(args=args, container_id=_cid_for(value))
 
-    return TypeInfo.from_type(t, args=args)
+    return TypeInfo.from_type(t, args=args, container_id=_cid_for(value))
 
 
 def _handle_randomdict(value: Any, depth: int) -> TypeInfo:
@@ -666,17 +803,25 @@ def _handle_randomdict(value: Any, depth: int) -> TypeInfo:
     except Exception as e:
         return TypeInfo.from_type(dict)
     else:
-        return TypeInfo.from_type(dict, args=args)
+        return TypeInfo.from_type(dict, args=args, container_id=_cid_for(value))
 
 
 def _handle_list(value: Any, depth: int) -> TypeInfo:
     sampler = lambda: (value[random.randint(0, len(value)-1)],) # this is O(1), much faster than islice()
-    return TypeInfo.from_type(list, args=_get_container_args(value, 1, sampler, depth))
+    return TypeInfo.from_type(
+        list,
+        args=_get_container_args(value, 1, sampler, depth),
+        container_id=_cid_for(value),
+    )
 
 
 def _handle_set(value: Any, depth: int) -> TypeInfo:
     sampler = lambda: (_random_item(value),)
-    return TypeInfo.from_type(type(value), args=_get_container_args(value, 1, sampler, depth))
+    return TypeInfo.from_type(
+        type(value),
+        args=_get_container_args(value, 1, sampler, depth),
+        container_id=_cid_for(value),
+    )
 
 
 def _handle_dict_keyiter(value: Any, depth: int) -> TypeInfo|None:

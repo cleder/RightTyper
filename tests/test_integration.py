@@ -3951,6 +3951,51 @@ def test_custom_collection_typing(superclass):
     """)
 
 
+def test_nested_growing_inner_collapses_to_cumulative_shape():
+    """An outer list holds one inner list that grows between successive
+    calls. Container sampling reuses one ``ContainerSamples`` entry per
+    physical container id; the outer's per-element-counter therefore
+    accumulates a progressive chain of inner snapshots — ``list[int]``,
+    then ``list[int]`` plus ``list[int|str]``, then plus
+    ``list[int|str|float]`` — across the three calls. Each call's
+    outer snapshot reflects the cumulative state at that point and
+    becomes a distinct ``CallTrace``. ``generalize``'s homogeneous
+    path collapses the outer (all three are ``list``) but the inner
+    position mixes a bare ``TypeInfo`` with two ``UnionTypeInfo``s and
+    falls into the non-homogeneous fallback, which uses
+    ``merged_types`` without ``assume_covariant``; under ``list``
+    invariance the inner union members stay distinct.
+
+    The annotation should describe the single observed inner — one
+    physical container with a final cumulative element set — as
+
+        def f(x: list[list[float|int|str]]) -> None: ...
+
+    not as a refinement-fragment union of progressive outer
+    snapshots."""
+    Path("t.py").write_text(textwrap.dedent("""\
+        def f(x):
+            pass
+
+        inner = [1]
+        outer = [inner]
+        f(outer)
+        inner.append("s")
+        f(outer)
+        inner.append(1.5)
+        f(outer)
+    """))
+
+    # ``--no-call-sampling`` so every call is recorded — keeps the test
+    # deterministic regardless of Poisson sampling timing.
+    rt_run('--no-call-sampling', 't.py')
+    output = Path("t.py").read_text()
+    code = cst.parse_module(output)
+    assert get_function(code, 'f') == textwrap.dedent("""\
+        def f(x: list[list[float|int|str]]) -> None: ...
+    """)
+
+
 @pytest.mark.parametrize('init, expected', [
     ['[1,2,3]', 'list[int]'],
     ['{"a", "b"}', 'set[str]'],
