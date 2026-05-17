@@ -330,7 +330,7 @@ def lub(
         and isinstance(a.type_obj, type) and isinstance(b.type_obj, type)
     ):
         a_obj, b_obj = cast(type, a.type_obj), cast(type, b.type_obj)
-        common: type | None = None
+        common = None
         if issubclass(a_obj, b_obj):
             common = b_obj
         elif issubclass(b_obj, a_obj):
