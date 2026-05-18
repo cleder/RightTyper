@@ -55,9 +55,17 @@ def runmypy(tmp_cwd, request):
     if pv == "3.9":
         return
     python_version = ('--python-version', pv) if pv else ()
+    # Point mypy at the project's pyproject.toml so ``[tool.mypy]``
+    # config (e.g. ``ignore_missing_imports``, ``check_untyped_defs``)
+    # applies even though mypy runs from ``tmp_cwd``.  Without this,
+    # tests that import ``righttyper.*`` from the generated source
+    # produce spurious ``Cannot find implementation`` errors locally.
+    from pathlib import Path as _Path
+    _project_root = _Path(__file__).resolve().parent.parent
     from mypy import api
     stdout, stderr, exit_status = api.run([
         '--cache-dir', str(MYPY_CACHE_DIR), # speeds up mypy
+        '--config-file', str(_project_root / 'pyproject.toml'),
         *python_version,
         *(mypy_args.args if mypy_args else ()),
         '.'
@@ -3951,6 +3959,33 @@ def test_custom_collection_typing(superclass):
     """)
 
 
+def test_container_inner_union_reduces_via_numeric_tower():
+    """A list whose sampled element types form a numeric-tower set
+    (``int``, ``float``, plus maybe ``bool`` and unrelated types like
+    ``str``) should be annotated with the numeric tower reduced:
+    ``int`` is absorbed by ``float`` (PEP 3141), ``bool`` by ``int``.
+
+    The element-type set comes out of ``_get_container_args`` as the
+    per-counter Counter; building the wrapping TypeInfo via
+    ``TypeInfo.from_set`` only dedups, leaving ``int|float|str`` etc.
+    intact. Building via ``merged_types`` (default ``assume_covariant=
+    False``, sound) lets lub rule 4 apply the numeric-tower subsumption.
+    """
+    Path("t.py").write_text(textwrap.dedent("""\
+        def f(x):
+            pass
+
+        f([1, 1.5, "s", True, 2, 2.5, "t", False])
+    """))
+
+    rt_run('t.py')
+    output = Path("t.py").read_text()
+    code = cst.parse_module(output)
+    assert get_function(code, 'f') == textwrap.dedent("""\
+        def f(x: list[float|str]) -> None: ...
+    """)
+
+
 def test_nested_growing_inner_collapses_to_cumulative_shape():
     """An outer list holds one inner list that grows between successive
     calls. Container sampling reuses one ``ContainerSamples`` entry per
@@ -3991,8 +4026,10 @@ def test_nested_growing_inner_collapses_to_cumulative_shape():
     rt_run('--no-call-sampling', 't.py')
     output = Path("t.py").read_text()
     code = cst.parse_module(output)
+    # ``int`` absorbed by ``float`` via numeric tower (lub rule 4 applied
+    # by ``merged_types`` inside ``resolved_samples``).
     assert get_function(code, 'f') == textwrap.dedent("""\
-        def f(x: list[list[float|int|str]]) -> None: ...
+        def f(x: list[list[float|str]]) -> None: ...
     """)
 
 
@@ -7666,7 +7703,7 @@ def test_max_union_size():
     """Unions exceeding --max-union-size collapse to Any in container elements."""
     t = textwrap.dedent("""\
         def f():
-            return [1, 'a', 2.0, b'x']
+            return ['a', 2.0, b'x', frozenset()]
 
         f()
         """)
@@ -7676,7 +7713,9 @@ def test_max_union_size():
     output = Path("t.py").read_text()
     code = cst.parse_module(output)
 
-    # 4 distinct element types (int, str, float, bytes) > limit 3 → Any
+    # 4 distinct element types (str, float, bytes, frozenset) > limit 3 → Any.
+    # No numeric-tower reduction available, so the 4-type union survives
+    # ``merged_types`` and trips ``UnionSizeT``.
     assert get_function(code, 'f') == textwrap.dedent("""\
         def f() -> list[Any]: ...
     """)

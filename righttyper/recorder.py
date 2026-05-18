@@ -2,7 +2,7 @@ import inspect
 import builtins
 from dataclasses import dataclass, field
 from types import CodeType, FrameType, FunctionType, GeneratorType
-from collections import Counter, defaultdict
+from collections import defaultdict
 import collections.abc as abc
 from pathlib import Path
 import logging
@@ -204,46 +204,38 @@ class PendingCallTrace:
 
 
 class _ResolveContainerSnapshotT(TypeInfo.Transformer):
-    """Rewrites every TypeInfo node carrying a ``container_id`` whose
-    corresponding ``ContainerSamples`` entry is in the by-cid map (built
-    once from the live cache at recording end) with a fresh outer
-    TypeInfo built from that entry's ``resolved_samples()`` view.
+    """For any node carrying ``container_id`` whose cache entry is live,
+    refresh its element-args from the cache's current per-counter
+    state (``cache_entry.resolved_samples()``) — outer type stays as
+    whatever the handler chose at recording time (e.g.,
+    ``_handle_randomdict`` chose ``dict``, ``_handle_tuple_iter`` chose
+    ``Iterator``).  Then ``super().visit`` recurses into the rewritten
+    args to chase any inner ``container_id``s.
 
-    Walks bottom-up via ``super().visit(node)``; the standard union-
-    dedup-after-modification pattern (see ``ResolvingT`` in
-    ``observations.py:443-448``) collapses unions of progressive
-    snapshots into one canonical entry once their members rewrite to
-    the same TypeInfo.
+    Standard union-dedup-after-modification (``ResolvingT`` pattern,
+    ``observations.py:443-448``) collapses members that rewrote to
+    equal forms.
 
-    Evicted cache entries (cid not in the map) are silent no-ops — the
-    original TypeInfo passes through unchanged.  Monotonic cids ensure
-    no id-reuse-after-GC can ever cause a wrong cache hit."""
+    Evicted cache entries are silent no-ops.  Monotonic cids
+    eliminate id-reuse-after-GC risk."""
 
     def __init__(self, cid_to_entry: "dict[int, Any]") -> None:
         self._cid_to_entry = cid_to_entry
 
     def visit(vself, node: TypeInfo) -> TypeInfo:
         pre = node
-        node = super().visit(node)
         if (cid := node.container_id) is not None:
             cache_entry = vself._cid_to_entry.get(cid)
             if cache_entry is not None:
-                resolved = cache_entry.resolved_samples()
-                inner_args = tuple(
-                    TypeInfo.from_set(set(c)) for c in resolved
-                )
-                if inner_args:
-                    # Source of truth for the outer shape: the cache's
-                    # own held container (``cache_entry.o``).  Avoids
-                    # the ``ti.replace(args=...)`` pitfall when ``ti``
-                    # itself is a Union (whose ``args`` are members,
-                    # not outer-element args).
-                    node = TypeInfo.from_type(
-                        type(cache_entry.o), args=inner_args
-                    )
-        # After modifying inside a union (members rewriting to equal
-        # forms), re-form via ``to_set()`` to dedup — the
-        # ``ResolvingT`` pattern.
+                # ``node.args`` for a tagged container TypeInfo is the
+                # element-args tuple — safe to overwrite with the
+                # cache's current resolved per-counter view.  Tagged
+                # nodes are never ``UnionTypeInfo``s (handlers only tag
+                # container outers), so this can't collapse a union.
+                node = node.replace(args=cache_entry.resolved_samples())
+        # Recurse to find tagged descendants — inner container_ids in
+        # the rewritten args, or members of an untagged Union.
+        node = super().visit(node)
         if pre is not node and isinstance(node, UnionTypeInfo):
             node = TypeInfo.from_set(
                 node.to_set(), typevar_index=node.typevar_index
@@ -851,10 +843,11 @@ class ObservationsRecorder:
 
 
     def _resolve_container_snapshots(self) -> None:
-        """At recording end, walk every trace and variable TypeInfo with
-        ``_ResolveContainerSnapshotT``, which rewrites nodes carrying
-        ``container_id`` to the resolved-latest snapshot from the live
-        ``ContainerTypeCache``.
+        """At recording end, walk every TypeInfo (in traces, variables,
+        module-level vars, arg defaults, etc.) with
+        ``_ResolveContainerSnapshotT``, which refreshes any node
+        carrying ``container_id`` to the live ``ContainerTypeCache``'s
+        current per-counter view.
 
         Built from the cache so id-reuse is impossible (cids are
         monotonic, assigned at ``ContainerSamples`` creation).  Cache-
@@ -865,28 +858,7 @@ class ObservationsRecorder:
         cid_to_entry = {e.cid: e for e in _cache._cache.values()}
         if not cid_to_entry:
             return
-        tr = _ResolveContainerSnapshotT(cid_to_entry)
-
-        for func_info in self._obs.func_info.values():
-            # Traces: rewrite each position; Counter rebuild collapses
-            # CallTraces that became equal after the rewrite.
-            if func_info.traces:
-                new_traces: Counter[CallTrace] = Counter()
-                for trace, count in func_info.traces.items():
-                    rewritten = tuple(tr.visit(ti) for ti in trace)
-                    if rewritten == tuple(trace):
-                        new_traces[trace] += count
-                    else:
-                        new_traces[CallTrace(
-                            rewritten, first_arg_class=trace.first_arg_class
-                        )] += count
-                func_info.traces = new_traces
-
-            # Variables: set of TypeInfos; rebuild from rewrites.
-            for var_name in list(func_info.variables):
-                func_info.variables[var_name] = {
-                    tr.visit(t) for t in func_info.variables[var_name]
-                }
+        self._obs.transform_types(_ResolveContainerSnapshotT(cid_to_entry))
 
 
     def finish_recording(self, main_globals: dict[str, Any]) -> Observations:

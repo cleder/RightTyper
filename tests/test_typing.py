@@ -973,14 +973,15 @@ def test_small_container_is_fully_scanned():
 
     _cache._cache.clear()
 
-    # Small list
-    data = [1, 'a', 2.0]
+    # Small list — uses non-numeric-tower types so lub rule 4 doesn't
+    # absorb any element type (e.g., ``int`` into ``float``).
+    data = ['a', b'c', 2.0]
     assert len(data) <= run_options.container_small_threshold  # Test precondition
     t = get_value_type(data)
 
     # Should see all types
-    assert 'int' in t
     assert 'str' in t
+    assert 'bytes' in t
     assert 'float' in t
 
 
