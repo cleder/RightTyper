@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from types import CodeType, FrameType, FunctionType, GeneratorType
 from collections import defaultdict
 import collections.abc as abc
+from functools import cache
 from pathlib import Path
 import logging
 from righttyper.logger import logger
@@ -220,21 +221,23 @@ class _ResolveContainerSnapshotT(TypeInfo.Transformer):
     eliminate id-reuse-after-GC risk."""
 
     def __init__(self, cid_to_entry: "dict[int, Any]") -> None:
-        self._cid_to_entry = cid_to_entry
+        @cache
+        def resolve(cid: int) -> tuple[TypeInfo, ...] | None:
+            entry = cid_to_entry.get(cid)
+            return entry.resolved_samples() if entry is not None else None
+        self._resolve = resolve
 
     def visit(vself, node: TypeInfo) -> TypeInfo:
         pre = node
         if (cid := node.container_id) is not None:
-            cache_entry = vself._cid_to_entry.get(cid)
-            if cache_entry is not None:
-                # ``node.args`` for a tagged container TypeInfo is the
-                # element-args tuple — safe to overwrite with the
-                # cache's current resolved per-counter view.  Tagged
-                # nodes are never ``UnionTypeInfo``s (handlers only tag
-                # container outers), so this can't collapse a union.
-                resolved = cache_entry.resolved_samples()
-                if resolved != node.args:
-                    node = node.replace(args=resolved)
+            # ``node.args`` for a tagged container TypeInfo is the
+            # element-args tuple — safe to overwrite with the
+            # cache's current resolved per-counter view.  Tagged
+            # nodes are never ``UnionTypeInfo``s (handlers only tag
+            # container outers), so this can't collapse a union.
+            resolved = vself._resolve(cid)
+            if resolved is not None and resolved != node.args:
+                node = node.replace(args=resolved)
         # Recurse to find tagged descendants — inner container_ids in
         # the rewritten args, or members of an untagged Union.
         node = super().visit(node)
