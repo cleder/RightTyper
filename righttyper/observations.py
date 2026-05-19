@@ -22,7 +22,7 @@ from righttyper.type_transformers import (
     LoadTypeObjT
 )
 from righttyper.typeinfo import TypeInfo, TypeInfoArg, UnknownTypeInfo, UnionTypeInfo, CallTrace
-from righttyper.righttyper_types import ArgumentName, FunctionName, VariableName, Filename, CodeId
+from righttyper.righttyper_types import ArgumentName, FunctionName, VariableName, Filename, CodeId, FuncLoc
 from righttyper.annotation import FuncAnnotation, ModuleVars, TraceDistribution
 from righttyper.type_id import PostponedArg0, get_type_name
 from righttyper.typeshed import get_typeshed_func_signature
@@ -544,89 +544,46 @@ class Observations:
     def _check_line_shifted_conflict(self, obs2: "Observations") -> None:
         """Refuse to merge .rt files that come from different source revisions.
 
-        The merge keys on ``CodeId``, which embeds ``first_code_line``. If
-        two .rt files were recorded against versions of the same source file
-        whose line numbers differ (e.g. one before and one after
-        ``process --output-files`` rewrote annotations), the same
-        ``(file_name, func_name)`` ends up with different ``CodeId``s and
-        the merge silently keeps both entries as orphans — leaving the
-        downstream emitter to pick one and drop the other's observations.
-        Detect this and raise so the caller can re-collect against a
-        consistent source state.
+        Two FuncInfos sharing ``(file_name, bytecode_hash)`` at distinct
+        ``first_code_line`` values were recorded against versions of the
+        same source file whose line numbers differ (e.g. one before and
+        one after ``process --output-files`` rewrote annotations) — the
+        bytecode is identical but the function moved. Merging them
+        silently would attribute observations to the wrong source
+        location.
 
-        Some legitimate cases share a ``(file_name, func_name)`` across
-        distinct ``first_code_line`` values without being a conflict:
-
-          * property getter/setter/deleter (all reported as ``Cls.prop``);
-          * synthetic names — ``<listcomp>``, ``<genexpr>``, ``<lambda>``,
-            ``<dictcomp>``, ``<setcomp>``;
-          * any user-defined overload that genuinely has the same qualname
-            at multiple source locations.
-
-        The disambiguator: collect the *set* of observed lines per
-        ``(file_name, func_name)`` from each side. A line from ``obs2``
-        only triggers a conflict if it is **not present** in ``obs1``'s
-        set for that name *and* ``obs1``'s set is non-empty — i.e. each
-        side independently saw a different line for what they think is
-        the same function. When both sides agree that a name has both
-        lines (typical of getter/setter), that's fine.
+        Different bodies at different lines (e.g. property
+        getter/setter, or two named closures in adjacent branches of one
+        enclosing function) hash to different ``bytecode_hash`` values
+        and don't collide here.
         """
         if not self.func_info or not obs2.func_info:
             return
 
-        def is_synthetic(name: "FunctionName") -> bool:
-            # Synthetic functions (<lambda>, <listcomp>, <genexpr>,
-            # <dictcomp>, <setcomp>) legitimately recur at different
-            # lines in the same file with the same parameter shape.
-            # CPython qualnames them either as the bare synthetic
-            # (top-level) or as ``Outer.<locals>.<synthetic>`` (nested).
-            return name.startswith("<") or name.rsplit(".", 1)[-1].startswith("<")
-
-        # The key disambiguates entries that legitimately share
-        # (file_name, func_name) at distinct lines — property
-        # getter/setter, methods with different arities, etc. — by their
-        # parameter shape. A line shift caused by source-revision drift
-        # would preserve the signature but change the line; that case
-        # produces a single ``key`` that maps to different lines in obs1
-        # vs obs2 and triggers the raise.
-        def sig_key(
-            fi: "FuncInfo",
-        ) -> tuple["Filename", "FunctionName", tuple["ArgumentName", ...],
-                  "ArgumentName | None", "ArgumentName | None"]:
-            return (
-                fi.code_id.file_name,
-                fi.code_id.func_name,
-                tuple(a.arg_name for a in fi.args),
-                fi.varargs,
-                fi.kwargs,
-            )
-
-        def line_by_sig(obs: "Observations") -> dict[tuple, int]:
-            out: dict[tuple, int] = {}
+        def lines_by_content(
+            obs: "Observations",
+        ) -> dict[tuple["Filename", int], tuple[int, "FunctionName"]]:
+            out: dict[tuple["Filename", int], tuple[int, "FunctionName"]] = {}
             for fi in obs.func_info.values():
-                if is_synthetic(fi.code_id.func_name):
-                    continue
-                out[sig_key(fi)] = fi.code_id.first_code_line
+                key = (fi.code_id.file_name, fi.code_id.bytecode_hash)
+                out[key] = (fi.code_id.first_code_line, fi.code_id.func_name)
             return out
 
-        lines1 = line_by_sig(self)
-        lines2 = line_by_sig(obs2)
-
-        for key, l2 in lines2.items():
-            l1 = lines1.get(key)
-            if l1 is None or l1 == l2:
+        lines1 = lines_by_content(self)
+        for key, (l2, _name2) in lines_by_content(obs2).items():
+            entry = lines1.get(key)
+            if entry is None or entry[0] == l2:
                 continue
+            l1, name1 = entry
             file_name = key[0]
-            func_name = key[1]
             raise ValueError(
-                f"Refusing to merge: {func_name!r} in {file_name} has "
+                f"Refusing to merge: {name1!r} in {file_name} has "
                 f"first_code_line {l1} in one observation set and {l2} "
-                f"in the other (same parameter shape). The .rt files "
-                f"were recorded against different source revisions "
-                f"(often because ``process --output-files`` rewrote "
-                f"annotations between collections). Remedy: delete "
-                f"righttyper-*.rt and re-collect against a consistent "
-                f"source state."
+                f"in the other (identical bytecode). The .rt files were "
+                f"recorded against different source revisions (often "
+                f"because ``process --output-files`` rewrote annotations "
+                f"between collections). Remedy: delete righttyper-*.rt "
+                f"and re-collect against a consistent source state."
             )
 
     def merge_observations(self, obs2: "Observations") -> None:
@@ -1058,7 +1015,7 @@ class Observations:
         return result
 
 
-    def collect_annotations(self) -> tuple[dict[CodeId, FuncAnnotation], dict[Filename, ModuleVars], dict[CodeId, list[TraceDistribution]]]:
+    def collect_annotations(self) -> tuple[dict[FuncLoc, FuncAnnotation], dict[Filename, ModuleVars], dict[FuncLoc, list[TraceDistribution]]]:
         """Collects function type annotations from the observed types."""
 
         accessed_attrs = self.accessed_attributes
@@ -1195,7 +1152,11 @@ class Observations:
 
         transform_types(MakePickleableT())
 
-        return annotations, module_vars, type_distributions
+        return (
+            {c.to_loc(): a for c, a in annotations.items()},
+            module_vars,
+            {c.to_loc(): d for c, d in type_distributions.items()},
+        )
 
 
 class LoadAndCheckTypesT(LoadTypeObjT):

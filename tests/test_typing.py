@@ -1514,8 +1514,10 @@ def test_merge_observations_aborts_on_line_shifted_twin():
         ArgInfo(ArgumentName("self"), None),
         ArgInfo(ArgumentName("x"), None),
     )
-    fid_pre = CodeId(Filename("m.py"), FunctionName("Cls.method"), 61, 0)
-    fid_post = CodeId(Filename("m.py"), FunctionName("Cls.method"), 57, 0)
+    # Identical bytecode_hash → same content; different first_code_line
+    # → genuine source-revision drift.
+    fid_pre = CodeId(Filename("m.py"), FunctionName("Cls.method"), 61, 0xCAFE)
+    fid_post = CodeId(Filename("m.py"), FunctionName("Cls.method"), 57, 0xCAFE)
 
     obs1 = Observations()
     obs1.func_info[fid_pre] = FuncInfo(
@@ -1557,8 +1559,9 @@ def test_merge_observations_accepts_nested_lambda_at_different_lines():
     )
 
     nested_name = FunctionName("tqdm._decr_instances.<locals>.<lambda>")
-    fid_a = CodeId(Filename("m.py"), nested_name, 708, 0)
-    fid_b = CodeId(Filename("m.py"), nested_name, 712, 0)
+    # Distinct callable values ⇒ different bytecode_hash.
+    fid_a = CodeId(Filename("m.py"), nested_name, 708, 0xAAAA)
+    fid_b = CodeId(Filename("m.py"), nested_name, 712, 0xBBBB)
     args = (ArgInfo(ArgumentName("inst"), None),)
 
     obs1 = Observations()
@@ -1594,8 +1597,9 @@ def test_merge_observations_accepts_property_getter_setter_pair():
         ArgumentName, CodeId, Filename, FunctionName,
     )
 
-    getter_id = CodeId(Filename("m.py"), FunctionName("Cls.prop"), 100, 0)
-    setter_id = CodeId(Filename("m.py"), FunctionName("Cls.prop"), 104, 0)
+    # Distinct bodies ⇒ different bytecode_hash.
+    getter_id = CodeId(Filename("m.py"), FunctionName("Cls.prop"), 100, 0x1111)
+    setter_id = CodeId(Filename("m.py"), FunctionName("Cls.prop"), 104, 0x2222)
 
     obs1 = Observations()
     obs1.func_info[getter_id] = FuncInfo(
@@ -1615,6 +1619,88 @@ def test_merge_observations_accepts_property_getter_setter_pair():
     obs1.merge_observations(obs2)
     assert getter_id in obs1.func_info
     assert setter_id in obs1.func_info
+
+
+def test_merge_observations_accepts_named_closures_at_different_lines():
+    """Two *named* closures (qualname like ``Outer.<locals>.view``) defined
+    in different branches of the same enclosing function may share parameter
+    shape. They are distinct callable values, not source-revision drift —
+    the bytecode hash discriminates them.
+
+    Regression: flask's ``View.as_view`` defines two ``def view(**kwargs):``
+    closures in adjacent branches of an ``if`` statement (lines 56 and 65 in
+    flask/views.py), both with the same signature. The earlier
+    signature-shape-based detector flagged this as drift and aborted the
+    merge, discarding all flask observations.
+    """
+    from righttyper.observations import (
+        Observations, FuncInfo, ArgInfo,
+    )
+    from righttyper.righttyper_types import (
+        ArgumentName, CodeId, Filename, FunctionName,
+    )
+
+    closure_name = FunctionName("View.as_view.<locals>.view")
+    # Distinct closure bodies ⇒ different bytecode_hash.
+    fid_a = CodeId(Filename("views.py"), closure_name, 56, 0xAAAA)
+    fid_b = CodeId(Filename("views.py"), closure_name, 65, 0xBBBB)
+    args = ()
+
+    obs1 = Observations()
+    obs1.func_info[fid_a] = FuncInfo(
+        code_id=fid_a, args=args,
+        varargs=None, kwargs=ArgumentName("kwargs"),
+    )
+    obs2 = Observations()
+    obs2.func_info[fid_b] = FuncInfo(
+        code_id=fid_b, args=args,
+        varargs=None, kwargs=ArgumentName("kwargs"),
+    )
+
+    # Must not raise — distinct closures with different content are legitimate.
+    obs1.merge_observations(obs2)
+    assert fid_a in obs1.func_info
+    assert fid_b in obs1.func_info
+
+
+def test_merge_observations_aborts_on_named_closure_drift():
+    """A named closure with identical bytecode appearing at different lines
+    across .rt files IS genuine source-revision drift and must raise — the
+    closure didn't change shape, the source was rewritten between collects.
+    """
+    from righttyper.observations import (
+        Observations, FuncInfo, ArgInfo,
+    )
+    from righttyper.righttyper_types import (
+        ArgumentName, CodeId, Filename, FunctionName,
+    )
+
+    closure_name = FunctionName("View.as_view.<locals>.view")
+    # Identical bytecode_hash at different lines ⇒ drift.
+    fid_pre = CodeId(Filename("views.py"), closure_name, 56, 0xCAFE)
+    fid_post = CodeId(Filename("views.py"), closure_name, 65, 0xCAFE)
+    args = ()
+
+    obs1 = Observations()
+    obs1.func_info[fid_pre] = FuncInfo(
+        code_id=fid_pre, args=args,
+        varargs=None, kwargs=ArgumentName("kwargs"),
+    )
+    obs2 = Observations()
+    obs2.func_info[fid_post] = FuncInfo(
+        code_id=fid_post, args=args,
+        varargs=None, kwargs=ArgumentName("kwargs"),
+    )
+
+    import pytest
+    with pytest.raises(ValueError) as exc_info:
+        obs1.merge_observations(obs2)
+
+    msg = str(exc_info.value)
+    assert "View.as_view.<locals>.view" in msg
+    assert "views.py" in msg
+    assert "56" in msg
+    assert "65" in msg
 
 
 def test_sample_until_stable_lifetime_budget(monkeypatch):

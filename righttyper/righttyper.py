@@ -38,7 +38,7 @@ from righttyper.righttyper_tool import (
 import righttyper.loader as loader
 from righttyper.righttyper_utils import detected_test_modules
 from righttyper.typeinfo import TypeInfo
-from righttyper.righttyper_types import CodeId, Filename, FunctionName
+from righttyper.righttyper_types import Filename, FuncLoc, FunctionName
 from righttyper.annotation import FuncAnnotation, ModuleVars, TraceDistribution
 from righttyper.observations import Observations
 from righttyper.recorder import ObservationsRecorder
@@ -48,7 +48,7 @@ from righttyper.atomic import AtomicCounter
 
 
 PKL_FILE_NAME = TOOL_NAME+"-{N}.rt"
-PKL_FILE_VERSION = 8
+PKL_FILE_VERSION = 9
 
 
 rec = ObservationsRecorder()
@@ -311,10 +311,10 @@ def output_changes(
 
 def emit_json(
     files: list[tuple[Filename, str]],
-    type_annotations: dict[CodeId, FuncAnnotation],
+    type_annotations: dict[FuncLoc, FuncAnnotation],
     module_vars: dict[Filename, ModuleVars],
     code_changes: list[CodeChanges],
-    type_distributions: dict[CodeId, list[TraceDistribution]] | None = None
+    type_distributions: dict[FuncLoc, list[TraceDistribution]] | None = None
 ) -> dict[str, Any]:
 
     file2module = {file: module for file, module in files}
@@ -424,9 +424,9 @@ def process_file_wrapper(args) -> CodeChanges:
 
 def process_files(
     files: list[tuple[Filename, str]],
-    type_annotations: dict[CodeId, FuncAnnotation],
+    type_annotations: dict[FuncLoc, FuncAnnotation],
     module_vars: dict[Filename, ModuleVars],
-    type_distributions: dict[CodeId, list[TraceDistribution]] | None = None
+    type_distributions: dict[FuncLoc, list[TraceDistribution]] | None = None
 ) -> list[CodeChanges]:
     if not files:
         return []

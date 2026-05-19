@@ -1,5 +1,7 @@
+import hashlib
+import marshal
 from dataclasses import dataclass
-from typing import Any, NewType, Protocol, TypeGuard
+from typing import Any, NamedTuple, NewType, Protocol, TypeGuard
 from types import CodeType
 
 
@@ -20,14 +22,61 @@ ArgumentName = NewType("ArgumentName", str)
 VariableName = NewType("VariableName", str)
 FunctionName = NewType("FunctionName", str)
 
-@dataclass(eq=True, order=True, frozen=True)
-class CodeId:
+
+def _content_hash(code: CodeType) -> int:
+    """Hash code-object content, excluding source-line metadata.
+
+    Catches actual bytecode/closure-body changes; ignores ``co_firstlineno``,
+    the line table, and ``co_filename`` so source-revision drift (same
+    content, different line) and installation-path differences both produce
+    the same hash. ``marshal`` deterministically encodes tuples of
+    primitive types across processes (Python's built-in ``hash`` does not).
+    Nested code objects in ``co_consts`` are recursively reduced to their
+    own hashes.
+    """
+    def _fields(c: CodeType) -> tuple:
+        return (
+            c.co_name, c.co_qualname, c.co_code,
+            tuple(_content_hash(k) if isinstance(k, CodeType) else k
+                  for k in c.co_consts),
+            c.co_names, c.co_varnames, c.co_freevars, c.co_cellvars,
+            c.co_argcount, c.co_posonlyargcount, c.co_kwonlyargcount,
+            c.co_flags,
+        )
+    digest = hashlib.sha256(marshal.dumps(_fields(code))).digest()
+    return int.from_bytes(digest[:8], 'little', signed=True)
+
+
+class FuncLoc(NamedTuple):
+    """Identifies a function by its source location (file + qualname + line).
+
+    Constructible without a runtime code object — used wherever a function
+    needs to be named but its bytecode isn't available (e.g., the AST
+    transformer mapping a ``def`` back to its recorded annotations).
+    """
     file_name: Filename
     func_name: FunctionName
     first_code_line: int
 
-    # if a <genexpr> or such, hash(code) to be able to differentiate same-line objects
-    code_hash: int
+
+@dataclass(eq=True, order=True, frozen=True)
+class CodeId:
+    """Identifies a function by source location *and* bytecode content.
+
+    Stricter than ``FuncLoc``: two functions sharing a location but
+    differing in body (e.g., two lambdas on one line, property
+    getter/setter at adjacent lines) remain distinct CodeIds. Used as the
+    record-time identity in ``Observations.func_info`` and as
+    ``TypeInfo.code_id`` so distinct Callable types stay distinct.
+    """
+    file_name: Filename
+    func_name: FunctionName
+    first_code_line: int
+    # Line-number-independent content hash. Same content at different
+    # lines (drift) ⇒ same bytecode_hash but different CodeIds; detected
+    # at merge time. Different content at any lines ⇒ different
+    # bytecode_hash ⇒ different CodeIds.
+    bytecode_hash: int
 
 
     @staticmethod
@@ -36,8 +85,11 @@ class CodeId:
             Filename(code.co_filename),
             FunctionName(code.co_qualname),
             code.co_firstlineno,
-            hash(code) if code.co_qualname.endswith('>') else 0
+            _content_hash(code),
         )
+
+    def to_loc(self) -> FuncLoc:
+        return FuncLoc(self.file_name, self.func_name, self.first_code_line)
 
 
 def cast_not_None[T](x: T | None) -> T:

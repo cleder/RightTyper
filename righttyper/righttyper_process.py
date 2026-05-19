@@ -4,7 +4,7 @@ from typing import TypeAlias
 import libcst as cst
 
 from righttyper.generate_stubs import PyiTransformer
-from righttyper.righttyper_types import Filename, CodeId, FunctionName
+from righttyper.righttyper_types import Filename, FuncLoc, FunctionName
 from righttyper.annotation import FuncAnnotation, ModuleVars, TraceDistribution
 from righttyper.righttyper_utils import (
     source_to_module_fqn
@@ -74,10 +74,10 @@ def correct_indentation_issues(file_contents: str) -> str:
 def process_file(
     filename: Filename,
     module_name: str,
-    type_annotations: dict[CodeId, FuncAnnotation],
+    type_annotations: dict[FuncLoc, FuncAnnotation],
     module_vars: ModuleVars,
     options: OutputOptions,
-    type_distributions: dict[CodeId, list[TraceDistribution]] | None = None
+    type_distributions: dict[FuncLoc, list[TraceDistribution]] | None = None
 ) -> CodeChanges:
     logger.debug(f"process_file: {filename}")
     try:
