@@ -415,11 +415,26 @@ class ContainerSamples:
         self.last_sampled_size = 0
         # Set by sample_until_stable on Good-Turing convergence
         self.last_singleton_ratios: list[float] = []
+        # Cached recording-time view; ``None`` means stale.  Invalidated
+        # on every mutation of ``all_samples``.  ``sample_view()`` is read
+        # once per ``_sample_container`` call after all mutations of that
+        # call, so over-invalidating within a call costs nothing — the
+        # win is the cross-call cache (spot_check_miss / empty-container
+        # paths, where ``all_samples`` is untouched).
+        self._sample_view: tuple[TypeInfo, ...] | None = None
 
     def add_sample(self, sample: tuple[TypeInfo, ...]) -> None:
         """Add a sample to cumulative history."""
+        self._sample_view = None
         for c, v in zip(self.all_samples, sample):
             c[v] += 1
+
+    def sample_view(self) -> tuple[TypeInfo, ...]:
+        """Cheap recording-time view: per-counter union over ``all_samples``.
+        Cached; rebuilt only when a sample introduced a new TypeInfo."""
+        if self._sample_view is None:
+            self._sample_view = tuple(TypeInfo.from_set(set(c)) for c in self.all_samples)
+        return self._sample_view
 
     def has_new_type(self, sample: tuple[TypeInfo, ...]) -> bool:
         """Check if sample contains a type not seen before."""
@@ -491,6 +506,7 @@ class ContainerSamples:
             raw_sample = sampler()
             sample = tuple(get_value_type(v, depth+1) for v in raw_sample)
             # Add to cumulative history
+            self._sample_view = None
             for c, v in zip(self.all_samples, sample):
                 c[v] += 1
             # Add to cycle-local counter
@@ -682,13 +698,7 @@ def _sample_container(
         sampling_logger.info(json.dumps(record, default=str))
         update_sampling_summary(record)
 
-    # Cheap recording-time view: just dedup ``all_samples`` per
-    # counter.  The resolver at ``finish_recording`` refreshes each
-    # tagged trace position via ``cache_entry.resolved_samples()``
-    # (which deduplicates inner-id snapshots and lub-reduces).  For
-    # cache-evicted entries (rare), this stored form survives — sound
-    # but possibly bloated.
-    return tuple(TypeInfo.from_set(set(c)) for c in entry.all_samples)
+    return entry.sample_view()
 
 
 def _handle_tuple(value: Any, depth: int) -> TypeInfo:
