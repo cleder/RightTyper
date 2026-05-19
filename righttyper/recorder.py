@@ -232,7 +232,9 @@ class _ResolveContainerSnapshotT(TypeInfo.Transformer):
                 # cache's current resolved per-counter view.  Tagged
                 # nodes are never ``UnionTypeInfo``s (handlers only tag
                 # container outers), so this can't collapse a union.
-                node = node.replace(args=cache_entry.resolved_samples())
+                resolved = cache_entry.resolved_samples()
+                if resolved != node.args:
+                    node = node.replace(args=resolved)
         # Recurse to find tagged descendants — inner container_ids in
         # the rewritten args, or members of an untagged Union.
         node = super().visit(node)

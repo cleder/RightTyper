@@ -415,51 +415,11 @@ class ContainerSamples:
         self.last_sampled_size = 0
         # Set by sample_until_stable on Good-Turing convergence
         self.last_singleton_ratios: list[float] = []
-        # Per-counter map ``id(inner) -> (back_ref, Counter of all progressive
-        # snapshots ever stored for this id at this counter)``.  When the
-        # same physical inner container is revisited and its cumulative
-        # contents have grown, ``all_samples`` accumulates progressive
-        # snapshots that look like distinct keys; this map lets
-        # ``resolved_samples()`` collapse them to one resolved-latest
-        # snapshot per id at recording time.  The Counter alongside the
-        # back-ref records exactly which snapshot keys an id contributed,
-        # so ``resolved_samples()`` can subtract them cleanly from
-        # ``all_samples`` and keep scalar entries intact.  ``all_samples``
-        # itself stays untouched during sampling — Good-Turing
-        # (``sample_until_stable``) reads it and needs the per-visit
-        # snapshot keys to estimate when content discovery has converged.
-        self.inner_ids: tuple[dict[int, tuple[object, Counter[TypeInfo]]], ...] = tuple(
-            {} for _ in range(n_counters)
-        )
 
-    def _track_inner_ids(self, raw: tuple[Any, ...], sample: tuple[TypeInfo, ...]) -> None:
-        """Record id-keyed snapshot info for any sample element whose
-        TypeInfo carries type arguments — i.e., a parameterized inner
-        whose content could refine over time.  Bare-type elements (no
-        ``args``) have nothing to dedup.  Mirrors
-        ``ContainerTypeCache.get``'s ``e.o is not o`` reuse check: an id
-        whose stored back-ref no longer matches the live object resets
-        the entry."""
-        for i, (raw_v, ti) in enumerate(zip(raw, sample)):
-            if not ti.args:
-                continue
-            v_id = id(raw_v)
-            existing = self.inner_ids[i].get(v_id)
-            if existing is None or existing[0] is not raw_v:
-                existing = (raw_v, Counter())
-                self.inner_ids[i][v_id] = existing
-            existing[1][ti] += 1
-
-    def add_sample(self, sample: tuple[TypeInfo, ...], raw: tuple[Any, ...] | None = None) -> None:
-        """Add a sample to cumulative history.
-
-        When ``raw`` is provided (the original Python values that produced
-        ``sample``), also update ``inner_ids`` so container elements can be
-        deduped by id at resolution time."""
+    def add_sample(self, sample: tuple[TypeInfo, ...]) -> None:
+        """Add a sample to cumulative history."""
         for c, v in zip(self.all_samples, sample):
             c[v] += 1
-        if raw is not None:
-            self._track_inner_ids(raw, sample)
 
     def has_new_type(self, sample: tuple[TypeInfo, ...]) -> bool:
         """Check if sample contains a type not seen before."""
@@ -467,43 +427,40 @@ class ContainerSamples:
 
     def resolved_samples(self) -> tuple[TypeInfo, ...]:
         """One merged TypeInfo per counter — this container's current
-        per-counter element types.
+        per-counter element types, with progressive snapshots of any
+        inner container collapsed to a single representative.
 
-        - Inner-container snapshots are pulled from ``inner_ids``
-          (latest snapshot per id, each carrying its own
-          ``container_id`` for the resolver to chase via its own
-          visit recursion).
-        - Scalar / non-tracked entries from ``all_samples`` pass
-          through.
-        - Lub-reduced via ``merged_types`` (default sound
-          ``assume_covariant=False``) so numeric-tower (``int <:
-          float``) and MRO-subtype (``bool <: int``) redundancies
-          collapse before the outer wrap.
+        For each parametric element in ``all_samples``, the element's
+        ``container_id`` uniquely identifies its physical inner container.
+        Progressive snapshots of the same inner share the same cid (and
+        outer shape) and differ only in args — so picking one tagged
+        representative per cid is enough.  The finish-time resolver
+        visits each representative and overwrites its args via the
+        inner's own ``resolved_samples()``, so the args we keep are
+        scratch.
 
-        Used at sample time (called from ``_handle_*`` via
-        ``_sample_container``) for the just-built TypeInfo's args, and
-        at finish-time by the resolver to refresh each tagged trace
-        position's args.  Cheap — no recursive cache walk; the
-        resolver's transformer-recursion handles deeper container_ids
-        in the returned args."""
+        Scalars (``container_id is None``) pass through unchanged.
+
+        Lub-reduced via ``merged_types`` so numeric-tower (``int <:
+        float``) and MRO-subtype (``bool <: int``) redundancies collapse
+        before the outer wrap."""
         from righttyper.generalize import merged_types
 
-        # Fast path: no parameterized inners → cumulative scalars only.
-        if not any(self.inner_ids):
-            return tuple(merged_types(set(c)) for c in self.all_samples)
+        def _reduce(s: set[TypeInfo]) -> TypeInfo:
+            return next(iter(s)) if len(s) == 1 else merged_types(s)
 
-        result: list[set[TypeInfo]] = [set() for _ in range(self.n_counters)]
-        for i in range(self.n_counters):
-            contributed: set[TypeInfo] = set()
-            for inner_id, (back_ref, id_counter) in self.inner_ids[i].items():
-                contributed.update(id_counter)
-                # Any past snapshot works — its ``container_id`` is the
-                # inner's cid, which the finish-time resolver chases.
-                result[i].add(next(iter(id_counter)))
-            result[i].update(
-                t for t in self.all_samples[i] if t not in contributed
-            )
-        return tuple(merged_types(c) for c in result)
+        out: list[TypeInfo] = []
+        for samples in self.all_samples:
+            seen_cids: set[int] = set()
+            deduped: set[TypeInfo] = set()
+            for ti in samples:
+                if (cid := ti.container_id) is None:
+                    deduped.add(ti)
+                elif cid not in seen_cids:
+                    seen_cids.add(cid)
+                    deduped.add(ti)
+            out.append(_reduce(deduped))
+        return tuple(out)
 
     def sample_until_stable(self, sampler: abc.Callable[[], tuple[Any, ...]], depth: int) -> str:
         """Sample until Good-Turing indicates stability or the per-container
@@ -533,10 +490,9 @@ class ContainerSamples:
 
             raw_sample = sampler()
             sample = tuple(get_value_type(v, depth+1) for v in raw_sample)
-            # Add to cumulative history (and track ids for parameterized inners)
+            # Add to cumulative history
             for c, v in zip(self.all_samples, sample):
                 c[v] += 1
-            self._track_inner_ids(raw_sample, sample)
             # Add to cycle-local counter
             for c, v in zip(cycle_counter, sample):
                 c[v] += 1
@@ -558,12 +514,11 @@ class ContainerSamples:
         """Fully scan a small container."""
         if self.n_counters == 1:
             for v in container:
-                self.add_sample((get_value_type(v, depth+1),), (v,))
+                self.add_sample((get_value_type(v, depth+1),))
         else:
             for k, v in container.items():
                 self.add_sample(
                     (get_value_type(k, depth+1), get_value_type(v, depth+1)),
-                    (k, v),
                 )
         self.last_sampled_size = len(container)
 
@@ -654,7 +609,7 @@ def _sample_container(
                 raw_sample = sampler()
                 sample = tuple(get_value_type(v, depth+1) for v in raw_sample)
                 if entry.has_new_type(sample):
-                    entry.add_sample(sample, raw_sample)
+                    entry.add_sample(sample)
                     stopping_reason = entry.sample_until_stable(sampler, depth)
                     entry.last_sampled_size = current_size
                     action = "spot_check_hit"
