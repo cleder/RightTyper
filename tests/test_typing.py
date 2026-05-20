@@ -1703,6 +1703,49 @@ def test_merge_observations_aborts_on_named_closure_drift():
     assert "65" in msg
 
 
+def test_merge_observations_accepts_genexprs_with_identical_bytecode():
+    """Two ``<genexpr>`` callables nested in the same enclosing function
+    frequently share *body* bytecode — Python compiles a genexp
+    ``(expr for var in iterable)`` so the iterable is passed as the
+    parameter ``.0`` rather than referenced from the body, leaving only
+    the per-element computation in the body.  Two physically distinct
+    genexps with the same per-element shape therefore produce identical
+    ``bytecode_hash``.
+
+    Regression: black's ``get_features_used`` contains two ``any(child.type ==
+    syms.star_expr for child in <iterable>)`` calls, lines 1228 and 1263.
+    The drift check raised on them and discarded all of black's recorded
+    observations.  Synthetic functions must be exempt from drift detection.
+    """
+    from righttyper.observations import (
+        Observations, FuncInfo, ArgInfo,
+    )
+    from righttyper.righttyper_types import (
+        ArgumentName, CodeId, Filename, FunctionName,
+    )
+
+    genexp_name = FunctionName("get_features_used.<locals>.<genexpr>")
+    # Identical bytecode_hash at different lines — synthetic case.
+    fid_a = CodeId(Filename("black.py"), genexp_name, 1228, 0xABCD)
+    fid_b = CodeId(Filename("black.py"), genexp_name, 1263, 0xABCD)
+    args = (ArgInfo(ArgumentName(".0"), None),)
+
+    obs1 = Observations()
+    obs1.func_info[fid_a] = FuncInfo(
+        code_id=fid_a, args=args, varargs=None, kwargs=None,
+    )
+    obs2 = Observations()
+    obs2.func_info[fid_b] = FuncInfo(
+        code_id=fid_b, args=args, varargs=None, kwargs=None,
+    )
+
+    # Must not raise — synthetics with identical bytecode at different
+    # lines are legitimate distinct genexp sites, not drift.
+    obs1.merge_observations(obs2)
+    assert fid_a in obs1.func_info
+    assert fid_b in obs1.func_info
+
+
 def test_sample_until_stable_lifetime_budget(monkeypatch):
     """container_max_samples is a per-container lifetime budget, not a
     per-call cap.  Once the cumulative samples for a container reach the

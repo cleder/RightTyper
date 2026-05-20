@@ -556,15 +556,27 @@ class Observations:
         getter/setter, or two named closures in adjacent branches of one
         enclosing function) hash to different ``bytecode_hash`` values
         and don't collide here.
+
+        Synthetic functions (``<lambda>``, ``<listcomp>``, ``<genexpr>``,
+        ``<dictcomp>``, ``<setcomp>``) are exempt: Python compiles a
+        genexp / comprehension so the iterable is passed in as ``.0``
+        rather than referenced from the body, so two physically distinct
+        synthetics in the same enclosing function frequently share body
+        bytecode.  They are distinct sites, not drift.
         """
         if not self.func_info or not obs2.func_info:
             return
+
+        def is_synthetic(name: "FunctionName") -> bool:
+            return name.startswith("<") or name.rsplit(".", 1)[-1].startswith("<")
 
         def lines_by_content(
             obs: "Observations",
         ) -> dict[tuple["Filename", int], tuple[int, "FunctionName"]]:
             out: dict[tuple["Filename", int], tuple[int, "FunctionName"]] = {}
             for fi in obs.func_info.values():
+                if is_synthetic(fi.code_id.func_name):
+                    continue
                 key = (fi.code_id.file_name, fi.code_id.bytecode_hash)
                 out[key] = (fi.code_id.first_code_line, fi.code_id.func_name)
             return out
