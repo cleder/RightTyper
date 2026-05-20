@@ -226,10 +226,18 @@ class _ResolveContainerSnapshotT(TypeInfo.Transformer):
             entry = cid_to_entry.get(cid)
             return entry.resolved_samples() if entry is not None else None
         self._resolve = resolve
+        # Cids currently being resolved up the recursion stack. A
+        # self-aliasing container (e.g., httpx cookie jar entries that
+        # reference the jar itself) puts a TypeInfo with the outer's
+        # container_id into the resolved args; without this guard, the
+        # descent into that arg re-resolves the same cid to the same
+        # args, recursing forever.
+        self._active_cids: set[int] = set()
 
     def visit(vself, node: TypeInfo) -> TypeInfo:
         pre = node
-        if (cid := node.container_id) is not None:
+        cid = node.container_id
+        if cid is not None and cid not in vself._active_cids:
             # ``node.args`` for a tagged container TypeInfo is the
             # element-args tuple — safe to overwrite with the
             # cache's current resolved per-counter view.  Tagged
@@ -239,8 +247,18 @@ class _ResolveContainerSnapshotT(TypeInfo.Transformer):
             if resolved is not None and resolved != node.args:
                 node = node.replace(args=resolved)
         # Recurse to find tagged descendants — inner container_ids in
-        # the rewritten args, or members of an untagged Union.
-        node = super().visit(node)
+        # the rewritten args, or members of an untagged Union. Mark
+        # cid active so any self-reference inside ``node.args`` is
+        # walked without re-resolving (terminates the recursion at
+        # the snapshot we already substituted above).
+        if cid is not None:
+            vself._active_cids.add(cid)
+            try:
+                node = super().visit(node)
+            finally:
+                vself._active_cids.discard(cid)
+        else:
+            node = super().visit(node)
         if pre is not node and isinstance(node, UnionTypeInfo):
             node = TypeInfo.from_set(
                 node.to_set(), typevar_index=node.typevar_index

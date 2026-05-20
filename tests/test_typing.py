@@ -1746,6 +1746,43 @@ def test_merge_observations_accepts_genexprs_with_identical_bytecode():
     assert fid_b in obs1.func_info
 
 
+def test_resolve_container_snapshot_handles_self_reference():
+    """A self-aliasing container (e.g., httpx response.request → response,
+    or any object that contains itself transitively) produces a
+    ContainerSamples entry whose ``resolved_samples()`` includes a
+    TypeInfo tagged with the same ``container_id`` as the outer container.
+
+    Without a cycle guard in the resolver, the visitor descends into that
+    inner TypeInfo, re-resolves the same cid back to the same args, and
+    recurses forever — observed as RecursionError during the httpx pytest
+    suite. The resolver must short-circuit re-entry on a cid currently
+    being resolved up the stack.
+    """
+    from righttyper.recorder import _ResolveContainerSnapshotT
+    from righttyper.typeinfo import TypeInfo
+
+    cid = 42
+
+    class FakeEntry:
+        def resolved_samples(self):
+            # Inner TypeInfo carries the same cid as the outer — the
+            # self-reference. Returned as the single element-type arg.
+            inner = TypeInfo.from_type(dict, args=(), container_id=cid)
+            return (inner,)
+
+    cid_to_entry = {cid: FakeEntry()}
+    outer = TypeInfo.from_type(dict, args=(), container_id=cid)
+
+    # Must terminate (no RecursionError).
+    resolver = _ResolveContainerSnapshotT(cid_to_entry)
+    result = resolver.visit(outer)
+
+    # Result should be a finite TypeInfo — the outer dict with its
+    # element-args refreshed once.
+    assert result is not None
+    assert result.container_id == cid
+
+
 def test_sample_until_stable_lifetime_budget(monkeypatch):
     """container_max_samples is a per-container lifetime budget, not a
     per-call cap.  Once the cumulative samples for a container reach the
