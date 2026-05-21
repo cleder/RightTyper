@@ -1662,6 +1662,41 @@ def test_is_private_type():
     assert _is_private_type(private_name)
 
 
+def test_is_private_type_survives_concurrent_sys_modules_mutation(monkeypatch):
+    """``_is_private_type`` walks ``sys.modules`` to check for public
+    re-exports.  ``getattr(m, name, None)`` can trigger a module-level
+    ``__getattr__`` that performs a lazy import (httpx, jaxtyping, etc. do
+    this), mutating sys.modules mid-iteration.  Without snapshotting,
+    CPython raises ``RuntimeError: dictionary changed size during iteration``.
+
+    Regression: httpx-righttyper -fullscan / -nocache lost the exercise
+    step (~635 traces, 21 unique functions) because finish_recording's
+    container-snapshot resolver hit this in ``lub`` → ``_is_private_type``.
+    """
+    import sys, types as _types
+    from righttyper.generalize import _is_private_type
+
+    # A type from a private module that gets re-exported nowhere.
+    target = type('HiddenType', (object,), {'__module__': '_secret_impl'})
+
+    # Install a module whose __getattr__ adds a new entry to sys.modules
+    # every time it's probed — simulates lazy-import side effects.
+    class LazyModule(_types.ModuleType):
+        _counter = 0
+        def __getattr__(self, name):
+            cls = type(self)
+            cls._counter += 1
+            new_name = f"_lazy_inject_{cls._counter}"
+            sys.modules[new_name] = _types.ModuleType(new_name)
+            raise AttributeError(name)
+
+    lazy = LazyModule("lazy_pkg")
+    monkeypatch.setitem(sys.modules, "lazy_pkg", lazy)
+
+    # Must not raise RuntimeError; should still classify as private.
+    assert _is_private_type(target)
+
+
 def test_lub_skips_private_mro_ancestors():
     """lub should not merge to a common ancestor defined in a private module."""
     from righttyper.generalize import lub

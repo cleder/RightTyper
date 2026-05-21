@@ -125,9 +125,14 @@ def _is_private_type(cls: type) -> bool:
     mod = getattr(cls, '__module__', '') or ''
     if mod == '__main__' or not any(p.startswith('_') for p in mod.split('.')):
         return False
-    # Private module — but check if any public module re-exports this type
+    # Private module — but check if any public module re-exports this type.
+    # Snapshot sys.modules: ``getattr(m, name, None)`` below can trigger a
+    # module-level ``__getattr__`` that performs a lazy import (httpx and
+    # several lazy-import frameworks do this), mutating sys.modules
+    # mid-iteration → RuntimeError.  Use a list snapshot, same defensive
+    # idiom as ``typemap.py:44``.
     name = getattr(cls, '__name__', '')
-    for m in sys.modules.values():
+    for m in list(sys.modules.values()):
         m_name = getattr(m, '__name__', '')
         if m_name and not any(p.startswith('_') for p in m_name.split('.')):
             if getattr(m, name, None) is cls:
