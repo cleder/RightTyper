@@ -30,6 +30,7 @@ class OutputOptions:
     type_distribution_comments: bool = False
     use_attribute_simplification: bool = False
     use_constructor_types: bool = False
+    with_coverage: bool = False  # At run: enable SlipCover instrumentation; at process: emit diagnostics artifact
 
 
     def process_args(self, kwargs: dict[str, Any]) -> None:

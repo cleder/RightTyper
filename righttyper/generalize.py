@@ -5,7 +5,7 @@ from collections import Counter
 from functools import cache
 from types import EllipsisType
 import sys
-from righttyper.typeinfo import TypeInfo, ListTypeInfo, CallTrace
+from righttyper.typeinfo import TypeInfo, ListTypeInfo, CallTrace, NoneTypeInfo
 from righttyper.type_id import get_type_name
 from righttyper.options import output_options
 
@@ -13,6 +13,23 @@ from righttyper.options import output_options
 # Types that are covariant (immutable), so merging their type arguments
 # is safe even for function parameters and return types.
 _COVARIANT_TYPES = (tuple, frozenset)
+
+# Single-arg generics whose lone type parameter is covariant in typeshed.
+# Used as Rule 6.5's allowlist of "safe" common ancestors: collapsing
+# ``list[X] | Iterable[Y]`` to ``Iterable[lub(X, Y)]`` is only sound
+# when the destination ABC is covariant in its arg. The mixed-variance
+# generics — ``Mapping`` (invariant key), ``Generator`` / ``Coroutine``
+# (contravariant send) — are intentionally excluded; collapsing them
+# would lie about variance.
+_FULLY_COVARIANT_SINGLE_ARG_TYPES = (
+    frozenset,
+    abc.Iterable, abc.Iterator,
+    abc.AsyncIterable, abc.AsyncIterator,
+    abc.Reversible, abc.Container, abc.Collection,
+    abc.Sequence, abc.Set,
+    abc.Awaitable,
+    abc.KeysView, abc.ValuesView,
+)
 
 # Generic types where bare form (no args) means "Any args" and subsumes parametrized forms.
 # Containers are handled separately via issubclass(t, abc.Container).
@@ -108,9 +125,14 @@ def _is_private_type(cls: type) -> bool:
     mod = getattr(cls, '__module__', '') or ''
     if mod == '__main__' or not any(p.startswith('_') for p in mod.split('.')):
         return False
-    # Private module — but check if any public module re-exports this type
+    # Private module — but check if any public module re-exports this type.
+    # Snapshot sys.modules: ``getattr(m, name, None)`` below can trigger a
+    # module-level ``__getattr__`` that performs a lazy import (httpx and
+    # several lazy-import frameworks do this), mutating sys.modules
+    # mid-iteration → RuntimeError.  Use a list snapshot, same defensive
+    # idiom as ``typemap.py:44``.
     name = getattr(cls, '__name__', '')
-    for m in sys.modules.values():
+    for m in list(sys.modules.values()):
         m_name = getattr(m, '__name__', '')
         if m_name and not any(p.startswith('_') for p in m_name.split('.')):
             if getattr(m, name, None) is cls:
@@ -144,13 +166,21 @@ def _is_subtype(a: type, b: type) -> bool:
 def lub(
     a: TypeInfo,
     b: TypeInfo,
-    for_variable: bool = False,
+    assume_covariant: bool = False,
     accessed_attributes: set[str] | None = None,
 ) -> TypeInfo:
     """Compute the least upper bound (most specific common supertype) of two types.
 
     Returns a single TypeInfo that contains both a and b. Falls back to
     a union (a | b) when no better merge is available.
+
+    ``assume_covariant=True`` tells lub to treat ordinarily-invariant
+    containers (``list``, ``dict``, ``set``) as if they were covariant
+    for the purpose of arg-merging — so ``lub(list[X], list[Y])`` becomes
+    ``list[lub(X, Y)]`` instead of leaving the union ``list[X] | list[Y]``
+    intact. Use it when the type being computed describes a value being
+    produced (return values, locals) rather than a slot that has to
+    accept caller-supplied values invariantly (function parameters).
     """
     # Rule 1: Identity
     if a == b:
@@ -229,15 +259,22 @@ def lub(
             if len(a.args) == len(b.args):
                 # type[X] is covariant (type[B] <: type[A] when B <: A)
                 is_covariant = issubclass(a.type_obj, _COVARIANT_TYPES) or a.type_obj is type
-                if for_variable or is_covariant:
+                if assume_covariant or is_covariant:
                     can_merge = all(
-                        (isinstance(aa, TypeInfo) and isinstance(ba, TypeInfo))
-                        or aa is ba
+                        aa is ba or (
+                            isinstance(aa, TypeInfo) and isinstance(ba, TypeInfo)
+                            # ListTypeInfo (Callable's parameter list) only
+                            # merges cleanly when the arities match; otherwise
+                            # the elementwise lub yields a list-union that
+                            # renders as Callable[[A]|[B], R] — invalid syntax.
+                            and not (aa.is_list() and ba.is_list()
+                                     and len(aa.args) != len(ba.args))
+                        )
                         for aa, ba in zip(a.args, b.args)
                     )
                     if can_merge:
                         merged_args = tuple(
-                            lub(cast(TypeInfo, aa), cast(TypeInfo, ba), for_variable=True)
+                            lub(cast(TypeInfo, aa), cast(TypeInfo, ba), assume_covariant=True)
                             if isinstance(aa, TypeInfo) and isinstance(ba, TypeInfo)
                             else aa
                             for aa, ba in zip(a.args, b.args)
@@ -282,6 +319,35 @@ def lub(
                 nparams = 2 if issubclass(common, abc.Mapping) else 1
                 args = tuple(a for a in nonempty.args[:nparams] if isinstance(a, TypeInfo))
                 return get_type_name(common).replace(args=args)
+
+    # Rule 6.5: Both non-empty parametrized + one's outer is an MRO
+    # subclass of the other's, and the supertype is in the
+    # ``_FULLY_COVARIANT_SINGLE_ARG_TYPES`` allowlist → collapse to
+    # that supertype with one lub'd type arg. E.g.,
+    # ``list[X] | Iterable[Y] → Iterable[lub(X, Y)]``.
+    # The allowlist is the soundness guard: only members whose lone
+    # type parameter is covariant in typeshed qualify. Mixed-variance
+    # generics (``Mapping``, ``Generator``, ``Callable``…) deliberately
+    # fall through to a union rather than being collapsed unsoundly.
+    if (
+        a.type_obj is not b.type_obj
+        and a.args and b.args
+        and isinstance(a.type_obj, type) and isinstance(b.type_obj, type)
+    ):
+        a_obj, b_obj = cast(type, a.type_obj), cast(type, b.type_obj)
+        common = None
+        if issubclass(a_obj, b_obj):
+            common = b_obj
+        elif issubclass(b_obj, a_obj):
+            common = a_obj
+        if (
+            common is not None
+            and common in _FULLY_COVARIANT_SINGLE_ARG_TYPES
+        ):
+            a0, b0 = a.args[0], b.args[0]
+            if isinstance(a0, TypeInfo) and isinstance(b0, TypeInfo):
+                merged = lub(a0, b0, assume_covariant=True)
+                return get_type_name(common).replace(args=(merged,))
 
     # Rule 7: MRO common supertype (non-generic types only).
     if not a.args and not b.args:
@@ -332,9 +398,9 @@ def lub(
                         or issubclass(b.type_obj, _COVARIANT_TYPES)
                         or a.type_obj is type or b.type_obj is type
                     )
-                    if for_variable or either_immutable:
+                    if assume_covariant or either_immutable:
                         merged_args = tuple(
-                            lub(a_ti[i], b_ti[i], for_variable=True)
+                            lub(a_ti[i], b_ti[i], assume_covariant=True)
                             for i in range(n)
                         )
                         return get_type_name(best).replace(args=merged_args)
@@ -351,7 +417,7 @@ def lub(
 
 def _merge_set(
     typeinfoset: set[TypeInfo],
-    for_variable: bool = False,
+    assume_covariant: bool = False,
     accessed_attributes: set[str] | None = None,
 ) -> TypeInfo:
     """Reduce a set of types using pairwise lub, then form the final union."""
@@ -411,7 +477,7 @@ def _merge_set(
         while i < len(types):
             j = i + 1
             while j < len(types):
-                merged = lub(types[i], types[j], for_variable, accessed_attributes)
+                merged = lub(types[i], types[j], assume_covariant, accessed_attributes)
                 if not merged.is_union():
                     # lub produced a single type — replace both with it
                     types[i] = merged
@@ -466,9 +532,50 @@ def _is_empty_container(t: TypeInfo) -> bool:
                         for a in t.args))
 
 
+def _is_never_advanced(t: TypeInfo) -> bool:
+    """True for a Generator/AsyncGenerator/Iterator/AsyncIterator with a
+    None yield type, or a Coroutine whose return type is None: the iterator
+    was constructed but never driven past first yield (or the coroutine was
+    never awaited to a useful return).
+    """
+    if t.type_obj in (abc.Generator, abc.AsyncGenerator, abc.Iterator, abc.AsyncIterator) and t.args:
+        first = t.args[0]
+        return isinstance(first, TypeInfo) and first == NoneTypeInfo
+    if t.type_obj is abc.Coroutine and len(t.args) == 3:
+        last = t.args[2]
+        return isinstance(last, TypeInfo) and last == NoneTypeInfo
+    return False
+
+
+def degenerate_shape(observations: abc.Iterable[TypeInfo]) -> str | None:
+    """Classify an observation multiset for the diagnostics artifact.
+
+    Returns one of:
+      - "empty-container":          every observation is an empty container
+      - "never-advanced-generator": every observation is a never-advanced
+                                    Generator/Iterator/Coroutine
+      - "always-none-optional":     every observation is None
+      - None:                       not (uniformly) degenerate
+
+    Mixed shapes (e.g. one observation that is an empty list plus another
+    that is a never-advanced iterator) abstain: the predicate refuses to
+    pick a misleading shape and returns None.
+    """
+    obs = set(observations)
+    if not obs:
+        return None
+    if all(t == NoneTypeInfo for t in obs):
+        return "always-none-optional"
+    if all(_is_empty_container(t) for t in obs):
+        return "empty-container"
+    if all(_is_never_advanced(t) for t in obs):
+        return "never-advanced-generator"
+    return None
+
+
 def merged_types(
     typeinfoset: set[TypeInfo],
-    for_variable: bool = False,
+    assume_covariant: bool = False,
     accessed_attributes: set[str] | None = None,
 ) -> TypeInfo:
     """Attempts to merge types in a set before forming their union."""
@@ -477,7 +584,7 @@ def merged_types(
         # is gated separately; honor the flag here so callers don't need to.
         if not output_options.use_attribute_simplification:
             accessed_attributes = None
-        return _merge_set(typeinfoset, for_variable, accessed_attributes)
+        return _merge_set(typeinfoset, assume_covariant, accessed_attributes)
     return TypeInfo.from_set(typeinfoset)
 
 

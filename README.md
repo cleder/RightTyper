@@ -258,8 +258,16 @@ Options:
                                   directory) is used.
   --poisson-rate FLOAT RANGE      Expected sample captures per second (Poisson
                                   process rate).  [default: 2.0; x>=0.1]
-  --sampling / --no-sampling      Whether to sample calls or to use every one.
-                                  [default: sampling]
+  --poisson-warmup-samples INTEGER RANGE
+                                  Capture this many initial calls per function
+                                  before Poisson sampling kicks in. Higher
+                                  values catch rare per-call variants (e.g.
+                                  exception paths through __exit__) that the
+                                  sampler may otherwise miss; lower is faster.
+                                  [default: 5; x>=0]
+  --call-sampling / --no-call-sampling
+                                  Whether to sample calls or to use every one.
+                                  [default: call-sampling]
   --no-sampling-for REGEX         Rather than sample, record every invocation
                                   of any functions matching the given regular
                                   expression. Can be passed multiple times.
@@ -289,6 +297,10 @@ Options:
   --container-check-probability FLOAT RANGE
                                   Probability of spot-checking a container for
                                   new types.  [default: 0.5; 0.0<=x<=1.0]
+  --container-caching / --no-container-caching
+                                  Cache container scan results; --no-
+                                  container-caching forces rescan every visit.
+                                  [default: container-caching]
   --max-union-size INTEGER RANGE  Maximum distinct types in a union before
                                   collapsing to Any.  [default: 32; x>=1]
   --resolve-mocks / --no-resolve-mocks
@@ -388,5 +400,34 @@ Options:
                                   observed types next to annotations with
                                   multiple types.  [default: no-type-
                                   distribution-comments]
+    --type-parameters / --no-type-parameters
+                                  Whether to infer type parameters (T1, T2,
+                                  ...) for correlated argument types. Disable
+                                  for plain union annotations.  [default:
+                                  type-parameters]
+    --inline-generics / --no-inline-generics
+                                  Whether to use PEP 695 inline type parameter
+                                  syntax (Python 3.12+). Disable for module-
+                                  level TypeVar declarations.  [default:
+                                  inline-generics]
+    --use-attribute-simplification / --no-use-attribute-simplification
+                                  Whether to widen types via static analysis
+                                  of which attributes the code actually
+                                  accesses, generalizing to a base class when
+                                  the code only uses attributes inherited from
+                                  it.  [default: no-use-attribute-
+                                  simplification]
+    --use-constructor-types / --no-use-constructor-types
+                                  Whether to use a variable's source-level
+                                  constructor or factory call (e.g., `p =
+                                  Path("/tmp")` or `p = Path.cwd()`) as its
+                                  annotation, when the observed runtime type
+                                  is consistent with the call's declared
+                                  return.  [default: no-use-constructor-types]
+    --with-coverage / --no-with-coverage
+                                  Capture branch and line coverage (using
+                                  SlipCover) to identify exercise-driver gaps
+                                  behind degenerate annotations.  [default:
+                                  no-with-coverage]
   --help                          Show this message and exit.
 ```

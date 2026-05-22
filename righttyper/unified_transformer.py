@@ -9,7 +9,7 @@ from righttyper.variable_binding import VariableBindingProvider
 import re
 
 from righttyper.typeinfo import TypeInfo
-from righttyper.righttyper_types import Filename, CodeId, FunctionName, VariableName, ArgumentName
+from righttyper.righttyper_types import Filename, FuncLoc, FunctionName, VariableName, ArgumentName
 from righttyper.annotation import FuncAnnotation, ModuleVars, TraceDistribution
 
 
@@ -186,7 +186,7 @@ class UnifiedTransformer(cst.CSTTransformer):
     def __init__(
         self,
         filename: str,
-        type_annotations: dict[CodeId, FuncAnnotation],
+        type_annotations: dict[FuncLoc, FuncAnnotation],
         module_variables: ModuleVars | None,
         module_name: str,
         *,
@@ -194,7 +194,7 @@ class UnifiedTransformer(cst.CSTTransformer):
         only_update_annotations: bool = False,
         inline_generics: bool = True,
         always_quote_annotations: bool = False,
-        type_distributions: dict[CodeId, list[TraceDistribution]] | None = None,
+        type_distributions: dict[FuncLoc, list[TraceDistribution]] | None = None,
     ) -> None:
         self.filename = filename
         self.type_annotations = type_annotations
@@ -486,8 +486,8 @@ class UnifiedTransformer(cst.CSTTransformer):
         # The annotation for the current function, if any
         self.func_ann_stack: list[FuncAnnotation|None] = [None]
 
-        # The CodeId for the current function, if any
-        self.func_code_id_stack: list[CodeId|None] = [None]
+        # The FuncLoc for the current function, if any
+        self.func_loc_stack: list[FuncLoc|None] = [None]
 
         # Whether to annotate variables in this scope
         self.annotate_vars_stack: list[bool] = [True]
@@ -901,10 +901,10 @@ class UnifiedTransformer(cst.CSTTransformer):
             self.get_metadata(PositionProvider, node).start.line
             for node in (node, *node.decorators)
         )
-        key = CodeId(Filename(self.filename), FunctionName(name), first_line, 0)
+        key = FuncLoc(Filename(self.filename), FunctionName(name), first_line)
         ann = self.type_annotations.get(key)
         self.func_ann_stack.append(ann)
-        self.func_code_id_stack.append(key)
+        self.func_loc_stack.append(key)
         self.annotate_vars_stack.append(True)
 
         # Reserve inline type-param names for this function so that outer
@@ -990,7 +990,7 @@ class UnifiedTransformer(cst.CSTTransformer):
         | cst.FlattenSentinel[cst.FunctionDef|cst.SimpleStatementLine|cst.BaseCompoundStatement] \
         | cst.RemovalSentinel:
         func_name = ".".join(self.name_stack[:-1])
-        func_code_id = self.func_code_id_stack.pop()
+        func_loc = self.func_loc_stack.pop()
         self.annotate_vars_stack.pop()
         self.name_stack.pop()
         self.name_stack.pop()
@@ -1194,8 +1194,8 @@ class UnifiedTransformer(cst.CSTTransformer):
 
             # Add type distribution comment if available
             if (
-                func_code_id
-                and (dist := self.type_distributions.get(func_code_id))
+                func_loc
+                and (dist := self.type_distributions.get(func_loc))
                 and (comment_text := self._format_distribution_comment(dist))
             ):
                 # Strip any existing # righttyper: comments to avoid duplication on re-runs

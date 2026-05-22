@@ -4,11 +4,12 @@ from dataclasses import dataclass, field
 from types import CodeType, FrameType, FunctionType, GeneratorType
 from collections import defaultdict
 import collections.abc as abc
+from functools import cache
 from pathlib import Path
 import logging
 from righttyper.logger import logger
 from righttyper.righttyper_types import ArgumentName, VariableName, Filename, CodeId, CallableWithCode, cast_not_None
-from righttyper.typeinfo import TypeInfo, NoneTypeInfo, UnknownTypeInfo, CallTrace
+from righttyper.typeinfo import TypeInfo, NoneTypeInfo, UnknownTypeInfo, CallTrace, UnionTypeInfo
 from typing import Final, Any, NewType, overload
 import typing
 from righttyper.observations import Observations, FuncInfo, OverriddenFunction, ArgInfo
@@ -118,7 +119,14 @@ class PendingCallTrace:
         self_type: TypeInfo|None,
     ) -> None:
         self.arg_info = arg_info
-        self.args_start = self._get_arg_types(arg_info)
+        # PY_START's arg_info.locals always contains every arg name (Python
+        # binds parameters before the body runs), so no element here is
+        # ever None — the per-entry None case in _get_arg_types only
+        # applies to later samples where a name may have been del'd.
+        self.args_start = typing.cast(
+            "tuple[TypeInfo, ...]",
+            self._get_arg_types(arg_info, arg_info.locals),
+        )
         self.yields: set[TypeInfo] = set()
         self.sends: set[TypeInfo] = set()
         self.is_async = bool(co_flags & (inspect.CO_ASYNC_GENERATOR | inspect.CO_COROUTINE))
@@ -127,56 +135,135 @@ class PendingCallTrace:
 
 
     @staticmethod
-    def _get_arg_types(arg_info: inspect.ArgInfo) -> tuple[TypeInfo, ...]:
-        """Computes the types of the given arguments."""
+    def _get_arg_types(
+        arg_info: inspect.ArgInfo,
+        locals_map: abc.Mapping[str, Any],
+    ) -> tuple[TypeInfo | None, ...]:
+        """Computes the types of the given arguments by looking up each name
+        in ``locals_map``. Yields ``None`` for any name absent from it
+        (callers fall back to the entry-time observation)."""
         return (
             *(
-                get_value_type(arg_info.locals[arg_name]) if arg_name in arg_info.locals else None
+                get_value_type(locals_map[arg_name]) if arg_name in locals_map else None
                 for arg_name in arg_info.args
             ),
             *(
                 (
+                    # Empty *args/**kwargs → Never, absorbed by the union.
                     TypeInfo.from_set({
-                        get_value_type(val) for val in arg_info.locals[arg_info.varargs]
-                    }, empty_is_none=True)
-                    if arg_info.varargs in arg_info.locals else None,
+                        get_value_type(val) for val in locals_map[arg_info.varargs]
+                    })
+                    if arg_info.varargs in locals_map else None,
                 )
                 if arg_info.varargs else ()
             ),
             *(
                 (
                     TypeInfo.from_set({
-                        get_value_type(val) for val in arg_info.locals[arg_info.keywords].values()
-                    }, empty_is_none=True)
-                    if arg_info.keywords in arg_info.locals else None,
+                        get_value_type(val) for val in locals_map[arg_info.keywords].values()
+                    })
+                    if arg_info.keywords in locals_map else None,
                 )
                 if arg_info.keywords else ()
             )
         )
 
 
-    def finish(self, retval: TypeInfo) -> CallTrace:
+    def finish(
+        self,
+        retval: TypeInfo,
+        locals_map: abc.Mapping[str, Any],
+    ) -> CallTrace:
         if self.is_generator:
-            y = TypeInfo.from_set(self.yields, empty_is_none=True)
-            s = TypeInfo.from_set(self.sends, empty_is_none=True)
+            # A generator that never yielded/sent really has type None.
+            y = TypeInfo.from_set(self.yields, on_empty=NoneTypeInfo)
+            s = TypeInfo.from_set(self.sends, on_empty=NoneTypeInfo)
 
             if self.is_async:
                 retval = TypeInfo.from_type(abc.AsyncGenerator, args=(y, s))
             else:
                 retval = TypeInfo.from_type(abc.Generator, args=(y, s, retval))
 
-        # Arguments may change value (and, in particular, empty containers may be added to)
-        # during the function execution, so we sample a 2nd time at the end.
-        args_now = self._get_arg_types(self.arg_info)
+        # Arguments may change value during execution — either a mutable
+        # container is filled in, or the parameter name is rebound to a
+        # different value (possibly of a different type). Callers with a
+        # live returning frame pass its ``f_locals`` to capture both kinds
+        # of change; callers without one (wrapped traces whose function
+        # never ran, leftover generators at shutdown) pass the PY_START
+        # snapshot, which still reflects in-place container mutations.
+        args_now = self._get_arg_types(self.arg_info, locals_map)
         type_data: tuple[TypeInfo, ...] = (
-            *tuple(
-                at_start if now is None else TypeInfo.from_set({at_start, now})
+            *(
+                at_start if now is None
+                else cast_not_None(TypeInfo.from_set({at_start, now}))
                 for at_start, now in zip(self.args_start, args_now)
             ),
             retval
         )
 
         return CallTrace(type_data, first_arg_class=self.self_type)
+
+
+class _ResolveContainerSnapshotT(TypeInfo.Transformer):
+    """For any node carrying ``container_id`` whose cache entry is live,
+    refresh its element-args from the cache's current per-counter
+    state (``cache_entry.resolved_samples()``) — outer type stays as
+    whatever the handler chose at recording time (e.g.,
+    ``_handle_randomdict`` chose ``dict``, ``_handle_tuple_iter`` chose
+    ``Iterator``).  Then ``super().visit`` recurses into the rewritten
+    args to chase any inner ``container_id``s.
+
+    Standard union-dedup-after-modification (``ResolvingT`` pattern,
+    ``observations.py:443-448``) collapses members that rewrote to
+    equal forms.
+
+    Evicted cache entries are silent no-ops.  Monotonic cids
+    eliminate id-reuse-after-GC risk."""
+
+    def __init__(self, cid_to_entry: "dict[int, Any]") -> None:
+        @cache
+        def resolve(cid: int) -> tuple[TypeInfo, ...] | None:
+            entry = cid_to_entry.get(cid)
+            return entry.resolved_samples() if entry is not None else None
+        self._resolve = resolve
+        # Cids currently being resolved up the recursion stack. A
+        # self-aliasing container (e.g., httpx cookie jar entries that
+        # reference the jar itself) puts a TypeInfo with the outer's
+        # container_id into the resolved args; without this guard, the
+        # descent into that arg re-resolves the same cid to the same
+        # args, recursing forever.
+        self._active_cids: set[int] = set()
+
+    def visit(vself, node: TypeInfo) -> TypeInfo:
+        pre = node
+        cid = node.container_id
+        if cid is not None and cid not in vself._active_cids:
+            # ``node.args`` for a tagged container TypeInfo is the
+            # element-args tuple — safe to overwrite with the
+            # cache's current resolved per-counter view.  Tagged
+            # nodes are never ``UnionTypeInfo``s (handlers only tag
+            # container outers), so this can't collapse a union.
+            resolved = vself._resolve(cid)
+            if resolved is not None and resolved != node.args:
+                node = node.replace(args=resolved)
+        # Recurse to find tagged descendants — inner container_ids in
+        # the rewritten args, or members of an untagged Union. Mark
+        # cid active so any self-reference inside ``node.args`` is
+        # walked without re-resolving (terminates the recursion at
+        # the snapshot we already substituted above).
+        if cid is not None:
+            vself._active_cids.add(cid)
+            try:
+                node = super().visit(node)
+            finally:
+                vself._active_cids.discard(cid)
+        else:
+            node = super().visit(node)
+        if pre is not node and isinstance(node, UnionTypeInfo):
+            node = TypeInfo.from_set(
+                node.to_set(), typevar_index=node.typevar_index
+            )
+        return node
 
 
 class ObservationsRecorder:
@@ -565,8 +652,17 @@ class ObservationsRecorder:
                     class_attrs[VariableName(attr)].add(TypeInfo.from_type(const_type))
 
 
-    def _record_return_type(self, tr: PendingCallTrace, code: CodeType, ret_type: Any) -> None:
-        """Records a pending call trace's return type, finishing the trace."""
+    def _record_return_type(
+        self,
+        tr: PendingCallTrace,
+        code: CodeType,
+        ret_type: Any,
+        locals_map: abc.Mapping[str, Any],
+    ) -> None:
+        """Records a pending call trace's return type, finishing the trace.
+        ``locals_map`` is the live ``frame.f_locals`` from the returning
+        frame, or the PY_START snapshot when no live frame is available
+        (wrapped traces whose function never ran; leftover generators)."""
         assert tr is not None
 
         retval_type = (
@@ -579,7 +675,7 @@ class ObservationsRecorder:
         )
 
         func_info = self._code2func_info[code]
-        func_info.traces.update((tr.finish(retval_type),))
+        func_info.traces.update((tr.finish(retval_type, locals_map),))
 
 
     def _complete_wrapped_trace(self, code: CodeType, frame_id: FrameId, return_value: Any) -> None:
@@ -598,7 +694,10 @@ class ObservationsRecorder:
                     if run_options.infer_wrapped_return_type
                     else UnknownTypeInfo
                 )
-                self._record_return_type(tr, wrapped_code, retval_type)
+                # No live frame for the wrapped function (it never ran);
+                # re-sample from the PY_START snapshot to preserve any
+                # in-place container mutations.
+                self._record_return_type(tr, wrapped_code, retval_type, tr.arg_info.locals)
 
 
     def record_return(self, code: CodeType, frame: FrameType, return_value: Any) -> bool:
@@ -607,7 +706,7 @@ class ObservationsRecorder:
         # print(f"record_return {code.co_qualname}")
         frame_id = id(frame)
         if (per_frame := self._pending_traces.get(code)) and (tr := per_frame.get(frame_id)):
-            self._record_return_type(tr, code, get_value_type(return_value))
+            self._record_return_type(tr, code, get_value_type(return_value), frame.f_locals)
             self._record_variables(code, frame)
             del per_frame[frame_id]
             self._complete_wrapped_trace(code, frame_id, return_value)
@@ -624,7 +723,7 @@ class ObservationsRecorder:
         # print(f"record_no_return {code.co_qualname}")
         frame_id = id(frame)
         if (per_frame := self._pending_traces.get(code)) and (tr := per_frame.get(frame_id)):
-            self._record_return_type(tr, code, None)
+            self._record_return_type(tr, code, None, frame.f_locals)
             self._record_variables(code, frame)
             del per_frame[frame_id]
             # Discard wrapped trace on exception
@@ -766,12 +865,44 @@ class ObservationsRecorder:
                 out[var_name].add(get_type_name(last_class))
 
 
+    def _resolve_container_snapshots(self) -> None:
+        """At recording end, walk every TypeInfo (in traces, variables,
+        module-level vars, arg defaults, etc.) with
+        ``_ResolveContainerSnapshotT``, which refreshes any node
+        carrying ``container_id`` to the live ``ContainerTypeCache``'s
+        current per-counter view.
+
+        Built from the cache so id-reuse is impossible (cids are
+        monotonic, assigned at ``ContainerSamples`` creation).  Cache-
+        evicted entries (cid no longer in the by-cid map) fall back to
+        the original TypeInfo — sound, just no fix benefit."""
+        from righttyper.type_id import _cache
+
+        cid_to_entry = {e.cid: e for e in _cache._cache.values()}
+        if not cid_to_entry:
+            return
+        self._obs.transform_types(_ResolveContainerSnapshotT(cid_to_entry))
+
+
     def finish_recording(self, main_globals: dict[str, Any]) -> Observations:
         # Any generators left?
         for code, per_frame in self._pending_traces.items():
             for tr in per_frame.values():
                 if tr.is_generator:
-                    self._record_return_type(tr, code, None)
+                    # Their frames are no longer reachable here; re-sample
+                    # from the PY_START snapshot.
+                    self._record_return_type(tr, code, None, tr.arg_info.locals)
+
+        # Rewrite trace positions whose ``arg_ids`` point to a still-live
+        # ``ContainerTypeCache`` entry.  Each call's trace snapshot was
+        # captured at call time, reflecting only the container's
+        # then-cumulative state; the cache has continued to accumulate
+        # samples (across this call's body and subsequent calls).
+        # Rewriting with the cache's resolved-latest collapses progressive
+        # refinement-fragment snapshots of one physical id across traces
+        # to one canonical shape.  Must run while ``_cache`` is still
+        # live, before ``finish_recording`` clears recorder state.
+        self._resolve_container_snapshots()
 
         self._assign_attributes_to_scopes()
 

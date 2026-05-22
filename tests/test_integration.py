@@ -55,9 +55,17 @@ def runmypy(tmp_cwd, request):
     if pv == "3.9":
         return
     python_version = ('--python-version', pv) if pv else ()
+    # Point mypy at the project's pyproject.toml so ``[tool.mypy]``
+    # config (e.g. ``ignore_missing_imports``, ``check_untyped_defs``)
+    # applies even though mypy runs from ``tmp_cwd``.  Without this,
+    # tests that import ``righttyper.*`` from the generated source
+    # produce spurious ``Cannot find implementation`` errors locally.
+    from pathlib import Path as _Path
+    _project_root = _Path(__file__).resolve().parent.parent
     from mypy import api
     stdout, stderr, exit_status = api.run([
         '--cache-dir', str(MYPY_CACHE_DIR), # speeds up mypy
+        '--config-file', str(_project_root / 'pyproject.toml'),
         *python_version,
         *(mypy_args.args if mypy_args else ()),
         '.'
@@ -701,6 +709,30 @@ def test_default_in_private_method():
 
     assert get_function(code, 'C.__f') == textwrap.dedent("""\
         def __f(self: Self, x: int|None=None) -> int: ...
+    """)
+
+
+def test_parameter_reassigned_to_different_type():
+    """A parameter rebound inside the body to a different type must be
+    annotated with the union of both types — otherwise the rebinding
+    statement itself fails to type-check (mypy: 'Incompatible types in
+    assignment')."""
+    t = textwrap.dedent("""\
+        def f(x):
+            x = str(x)
+            return x
+
+        f(42)
+        """)
+
+    Path("t.py").write_text(t)
+
+    rt_run('t.py')
+    output = Path("t.py").read_text()
+    code = cst.parse_module(output)
+
+    assert get_function(code, 'f') == textwrap.dedent("""\
+        def f(x: int|str) -> str: ...
     """)
 
 
@@ -3198,6 +3230,11 @@ def test_varargs():
 
 
 def test_varargs_empty():
+    """If a function is only ever observed with empty ``*args``, RT has
+    no element-type observations to emit — leave ``*args`` unannotated.
+    (Previously RT emitted ``*args: None``, which read as "the element
+    type is None" — meaningless, since ``None`` can't be an element of
+    a positional-extras tuple.)"""
     Path("t.py").write_text(textwrap.dedent("""\
         def foo(x, *args):
             pass
@@ -3210,8 +3247,59 @@ def test_varargs_empty():
     output = Path("t.py").read_text()
     code = cst.parse_module(output)
     assert get_function(code, 'foo') == textwrap.dedent("""\
-        def foo(x: bool, *args: None) -> None: ...
+        def foo(x: bool, *args) -> None: ...
     """)
+
+
+def test_varargs_mixed_empty_and_non_empty_calls():
+    """Regression: when the same function is called with non-empty
+    ``*args`` at one site and empty ``*args`` at another, the emitted
+    annotation must be just the element-type union (here ``int``) — not
+    ``int | None``.
+
+    The bug: the recorder used ``TypeInfo.from_set(elem_types,
+    empty_is_none=True)`` to compute the per-call varargs element type,
+    so a call with zero extras contributed ``NoneTypeInfo`` to the union.
+    When merged with non-empty calls' real-type observations, the
+    emitted annotation came out as ``int | None``, with the ``None``
+    being a sampling artifact rather than a real caller-supplied type."""
+    Path("t.py").write_text(textwrap.dedent("""\
+        def foo(x, *args):
+            pass
+
+        foo(True, 1)
+        foo(True)
+        """
+    ))
+
+    rt_run('t.py')
+    output = Path("t.py").read_text()
+    code = cst.parse_module(output)
+    assert get_function(code, 'foo') == textwrap.dedent("""\
+        def foo(x: bool, *args: int) -> None: ...
+    """)
+
+
+def test_kwargs_mixed_empty_and_non_empty_calls():
+    """Same shape as test_varargs_mixed_empty_and_non_empty_calls but
+    for ``**kwargs``: a call with empty kwargs must not contribute
+    ``None`` to the kwargs value-type union."""
+    Path("t.py").write_text(textwrap.dedent("""\
+        def foo(x, **kwargs):
+            pass
+
+        foo(True, a=1)
+        foo(True)
+        """
+    ))
+
+    rt_run('t.py')
+    output = Path("t.py").read_text()
+    code = cst.parse_module(output)
+    assert get_function(code, 'foo') == textwrap.dedent("""\
+        def foo(x: bool, **kwargs: int) -> None: ...
+    """)
+
 
 
 def test_varargs_json():
@@ -3251,6 +3339,9 @@ def test_kwargs():
 
 
 def test_kwargs_empty():
+    """Analog of test_varargs_empty for ``**kwargs``: no kwargs ever
+    observed → leave the slot unannotated rather than emit the
+    meaningless ``**kwargs: None``."""
     Path("t.py").write_text(textwrap.dedent("""\
         def foo(x, **kwargs):
             pass
@@ -3263,7 +3354,7 @@ def test_kwargs_empty():
     output = Path("t.py").read_text()
     code = cst.parse_module(output)
     assert get_function(code, 'foo') == textwrap.dedent("""\
-        def foo(x: bool, **kwargs: None) -> None: ...
+        def foo(x: bool, **kwargs) -> None: ...
     """)
 
 
@@ -3865,6 +3956,80 @@ def test_custom_collection_typing(superclass):
 
     assert get_function(code, 'foo') == textwrap.dedent("""\
         def foo(x: MyContainer) -> None: ...
+    """)
+
+
+def test_container_inner_union_reduces_via_numeric_tower():
+    """A list whose sampled element types form a numeric-tower set
+    (``int``, ``float``, plus maybe ``bool`` and unrelated types like
+    ``str``) should be annotated with the numeric tower reduced:
+    ``int`` is absorbed by ``float`` (PEP 3141), ``bool`` by ``int``.
+
+    The element-type set comes out of ``_get_container_args`` as the
+    per-counter Counter; building the wrapping TypeInfo via
+    ``TypeInfo.from_set`` only dedups, leaving ``int|float|str`` etc.
+    intact. Building via ``merged_types`` (default ``assume_covariant=
+    False``, sound) lets lub rule 4 apply the numeric-tower subsumption.
+    """
+    Path("t.py").write_text(textwrap.dedent("""\
+        def f(x):
+            pass
+
+        f([1, 1.5, "s", True, 2, 2.5, "t", False])
+    """))
+
+    rt_run('t.py')
+    output = Path("t.py").read_text()
+    code = cst.parse_module(output)
+    assert get_function(code, 'f') == textwrap.dedent("""\
+        def f(x: list[float|str]) -> None: ...
+    """)
+
+
+def test_nested_growing_inner_collapses_to_cumulative_shape():
+    """An outer list holds one inner list that grows between successive
+    calls. Container sampling reuses one ``ContainerSamples`` entry per
+    physical container id; the outer's per-element-counter therefore
+    accumulates a progressive chain of inner snapshots — ``list[int]``,
+    then ``list[int]`` plus ``list[int|str]``, then plus
+    ``list[int|str|float]`` — across the three calls. Each call's
+    outer snapshot reflects the cumulative state at that point and
+    becomes a distinct ``CallTrace``. ``generalize``'s homogeneous
+    path collapses the outer (all three are ``list``) but the inner
+    position mixes a bare ``TypeInfo`` with two ``UnionTypeInfo``s and
+    falls into the non-homogeneous fallback, which uses
+    ``merged_types`` without ``assume_covariant``; under ``list``
+    invariance the inner union members stay distinct.
+
+    The annotation should describe the single observed inner — one
+    physical container with a final cumulative element set — as
+
+        def f(x: list[list[float|int|str]]) -> None: ...
+
+    not as a refinement-fragment union of progressive outer
+    snapshots."""
+    Path("t.py").write_text(textwrap.dedent("""\
+        def f(x):
+            pass
+
+        inner = [1]
+        outer = [inner]
+        f(outer)
+        inner.append("s")
+        f(outer)
+        inner.append(1.5)
+        f(outer)
+    """))
+
+    # ``--no-call-sampling`` so every call is recorded — keeps the test
+    # deterministic regardless of Poisson sampling timing.
+    rt_run('--no-call-sampling', 't.py')
+    output = Path("t.py").read_text()
+    code = cst.parse_module(output)
+    # ``int`` absorbed by ``float`` via numeric tower (lub rule 4 applied
+    # by ``merged_types`` inside ``resolved_samples``).
+    assert get_function(code, 'f') == textwrap.dedent("""\
+        def f(x: list[list[float|str]]) -> None: ...
     """)
 
 
@@ -7538,7 +7703,7 @@ def test_max_union_size():
     """Unions exceeding --max-union-size collapse to Any in container elements."""
     t = textwrap.dedent("""\
         def f():
-            return [1, 'a', 2.0, b'x']
+            return ['a', 2.0, b'x', frozenset()]
 
         f()
         """)
@@ -7548,7 +7713,9 @@ def test_max_union_size():
     output = Path("t.py").read_text()
     code = cst.parse_module(output)
 
-    # 4 distinct element types (int, str, float, bytes) > limit 3 → Any
+    # 4 distinct element types (str, float, bytes, frozenset) > limit 3 → Any.
+    # No numeric-tower reduction available, so the 4-type union survives
+    # ``merged_types`` and trips ``UnionSizeT``.
     assert get_function(code, 'f') == textwrap.dedent("""\
         def f() -> list[Any]: ...
     """)

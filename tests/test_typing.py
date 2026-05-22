@@ -366,9 +366,6 @@ def test_typeinfo_from_set():
     t = TypeInfo.from_set(set())
     assert str(t) == "typing.Never"
 
-    t = TypeInfo.from_set(set(), empty_is_none=True)
-    assert t is NoneTypeInfo
-
     t = TypeInfo.from_set({TypeInfo.from_type(int)})
 
     assert str(t) == 'int'
@@ -377,6 +374,46 @@ def test_typeinfo_from_set():
 
     assert t is not TypeInfo.from_type(int) # should be new object
     assert t.type_obj is int
+
+
+def test_typeinfo_from_set_on_empty():
+    """``from_set`` lets the caller name what to return when the input
+    set is empty. Replaces the older ``empty_is_none=True`` flag, which
+    conflated three distinct semantics into one boolean:
+
+    - ``NoneTypeInfo`` — for slots where empty observations genuinely
+      mean "the type is None" (e.g., a generator that never yielded).
+    - ``Never`` — for slots where empty observations contribute nothing
+      to a union (e.g., a varargs slot at a call with no extras).
+    - ``None`` (Python sentinel) — for slots where empty means "no
+      information was recorded" (e.g., the merged-arg-default rebuild
+      whose absence of defaults must not invent a None default).
+
+    A single ``on_empty=<value>`` parameter lets each caller pick the
+    right sentinel.
+    """
+    from righttyper.typeinfo import NoneTypeInfo
+
+    # Default behavior: empty → Never (unchanged from before).
+    t = TypeInfo.from_set(set())
+    assert str(t) == "typing.Never"
+
+    # Generator-yields-nothing case: empty → NoneTypeInfo.
+    t = TypeInfo.from_set(set(), on_empty=NoneTypeInfo)
+    assert t is NoneTypeInfo
+
+    # No-information case: empty → Python None (sentinel).
+    t = TypeInfo.from_set(set(), on_empty=None)
+    assert t is None
+
+    # Caller-supplied sentinel: anything else they want.
+    sentinel = TypeInfo.from_type(int)
+    t = TypeInfo.from_set(set(), on_empty=sentinel)
+    assert t is sentinel
+
+    # Non-empty input: unchanged (on_empty ignored).
+    t = TypeInfo.from_set({TypeInfo.from_type(int)}, on_empty=None)
+    assert str(t) == 'int'
 
     t = TypeInfo.from_set({
             TypeInfo.from_type(int),
@@ -782,50 +819,50 @@ def test_from_set_with_any():
     assert t.args == ()
 
 
-def test_merged_types_for_variable_simple():
-    """Test that for_variable=True merges similar generics."""
-    # Without for_variable, should keep separate
+def test_merged_types_assume_covariant_simple():
+    """Test that assume_covariant=True merges similar generics."""
+    # Without assume_covariant, should keep separate
     assert "list[bool]|list[int]" == str(merged_types({
             TypeInfo.from_type(list, args=(TypeInfo.from_type(int),)),
             TypeInfo.from_type(list, args=(TypeInfo.from_type(bool),))
         }
     ))
 
-    # With for_variable=True, should merge type arguments.
+    # With assume_covariant=True, should merge type arguments.
     # bool is a subtype of int, so lub further reduces to list[int]
     assert "list[int]" == str(merged_types({
             TypeInfo.from_type(list, args=(TypeInfo.from_type(int),)),
             TypeInfo.from_type(list, args=(TypeInfo.from_type(bool),))
         },
-        for_variable=True
+        assume_covariant=True
     ))
 
 
-def test_merged_types_for_variable_with_none():
-    """Test for_variable with None in the union."""
+def test_merged_types_assume_covariant_with_none():
+    """Test assume_covariant with None in the union."""
     # list[int] | list[bool] | None -> list[int] | None (bool simplified to int)
     assert "list[int]|None" == str(merged_types({
             TypeInfo.from_type(list, args=(TypeInfo.from_type(int),)),
             TypeInfo.from_type(list, args=(TypeInfo.from_type(bool),)),
             TypeInfo.from_type(type(None))
         },
-        for_variable=True
+        assume_covariant=True
     ))
 
 
-def test_merged_types_for_variable_dict():
-    """Test for_variable with dict types."""
+def test_merged_types_assume_covariant_dict():
+    """Test assume_covariant with dict types."""
     # dict[str, int] | dict[str, float] -> dict[str, float] (int simplified to float via numeric tower)
     assert "dict[str, float]" == str(merged_types({
             TypeInfo.from_type(dict, args=(TypeInfo.from_type(str), TypeInfo.from_type(int))),
             TypeInfo.from_type(dict, args=(TypeInfo.from_type(str), TypeInfo.from_type(float)))
         },
-        for_variable=True
+        assume_covariant=True
     ))
 
 
-def test_merged_types_for_variable_nested():
-    """Test for_variable with nested generics."""
+def test_merged_types_assume_covariant_nested():
+    """Test assume_covariant with nested generics."""
     # list[tuple[int, float]] | list[tuple[bool, float]] -> list[tuple[int, float]] (bool simplified to int)
     assert "list[tuple[int, float]]" == str(merged_types({
             TypeInfo.from_type(list, args=(
@@ -841,28 +878,28 @@ def test_merged_types_for_variable_nested():
                 )),
             )),
         },
-        for_variable=True
+        assume_covariant=True
     ))
 
 
-def test_merged_types_for_variable_different_containers():
+def test_merged_types_assume_covariant_different_containers():
     """Test that different container types are not merged."""
-    # list[int] | set[int] should stay separate even with for_variable=True
+    # list[int] | set[int] should stay separate even with assume_covariant=True
     assert "list[int]|set[int]" == str(merged_types({
             TypeInfo.from_type(list, args=(TypeInfo.from_type(int),)),
             TypeInfo.from_type(set, args=(TypeInfo.from_type(int),))
         },
-        for_variable=True
+        assume_covariant=True
     ))
 
 
-def test_merged_types_for_variable_different_arity():
+def test_merged_types_assume_covariant_different_arity():
     """Different-arity tuples merge to varlen (wider but valid, see test_generalize.py)."""
     result = str(merged_types({
             TypeInfo.from_type(tuple, args=(TypeInfo.from_type(int),)),
             TypeInfo.from_type(tuple, args=(TypeInfo.from_type(int), TypeInfo.from_type(str)))
         },
-        for_variable=True
+        assume_covariant=True
     ))
     assert result == "tuple[int|str, ...]"
 
@@ -936,14 +973,15 @@ def test_small_container_is_fully_scanned():
 
     _cache._cache.clear()
 
-    # Small list
-    data = [1, 'a', 2.0]
+    # Small list — uses non-numeric-tower types so lub rule 4 doesn't
+    # absorb any element type (e.g., ``int`` into ``float``).
+    data = ['a', b'c', 2.0]
     assert len(data) <= run_options.container_small_threshold  # Test precondition
     t = get_value_type(data)
 
     # Should see all types
-    assert 'int' in t
     assert 'str' in t
+    assert 'bytes' in t
     assert 'float' in t
 
 
@@ -1385,6 +1423,364 @@ def test_merge_observations_unions_overrides_lists():
     }
     # Each parent should appear exactly once.
     assert len(merged) == 3
+
+
+def test_merge_observations_preserves_no_default_for_args_lacking_defaults():
+    """Regression: ``merge_observations`` was converting a no-default arg
+    (``arg.default = Python None``) into a None-typed default
+    (``arg.default = NoneTypeInfo``) when the rebuild path triggered,
+    because the rebuild used ``TypeInfo.from_set({}, empty_is_none=True)``
+    which returns ``NoneTypeInfo`` for an empty set. The bogus
+    ``NoneTypeInfo`` default then propagated into the emitted annotation
+    as a spurious ``| None`` union member.
+
+    For an arg that has no recorded default in *either* observation set,
+    the merged default must remain Python ``None`` (the "no default
+    information" sentinel) — the rebuild must not invent a None default
+    from the absence of one.
+
+    Concretely modelled on ``tqdm_asyncio.as_completed`` where
+    ``cls``/``fs``/``tqdm_kwargs`` have no defaults and ``loop``/
+    ``timeout``/``total`` have ``=None``: the disagreement on the latter
+    forces ``args1 != args2``, triggers the rebuild, and the bug then
+    invented ``NoneTypeInfo`` defaults for the former.
+    """
+    from righttyper.observations import Observations, FuncInfo, ArgInfo
+    from righttyper.typeinfo import NoneTypeInfo
+    from righttyper.righttyper_types import (
+        ArgumentName, CodeId, Filename, FunctionName,
+    )
+
+    fid = CodeId(Filename("m.py"), FunctionName("f"), 1, 0)
+    # obs1: ``f(fs, loop)`` — neither arg has default information
+    # (pytest-like observation where defaults weren't captured).
+    args1 = (
+        ArgInfo(ArgumentName("fs"), None),
+        ArgInfo(ArgumentName("loop"), None),
+    )
+    # obs2: ``f(fs, loop=None)`` — same fs (no default), but loop has
+    # a ``=None`` default (NoneTypeInfo) recorded.
+    args2 = (
+        ArgInfo(ArgumentName("fs"), None),
+        ArgInfo(ArgumentName("loop"), NoneTypeInfo),
+    )
+
+    obs1 = Observations()
+    obs1.func_info[fid] = FuncInfo(
+        code_id=fid, args=args1, varargs=None, kwargs=None,
+    )
+    obs2 = Observations()
+    obs2.func_info[fid] = FuncInfo(
+        code_id=fid, args=args2, varargs=None, kwargs=None,
+    )
+
+    obs1.merge_observations(obs2)
+    merged_fs = obs1.func_info[fid].args[0]
+    assert merged_fs.arg_name == "fs"
+    assert merged_fs.default is None, (
+        f"fs had no recorded default in either observation; merge must "
+        f"preserve that as Python None (the no-default sentinel). Got "
+        f"{merged_fs.default!r}."
+    )
+
+    # loop should still report NoneTypeInfo (its ``=None`` default).
+    merged_loop = obs1.func_info[fid].args[1]
+    assert merged_loop.arg_name == "loop"
+    assert merged_loop.default is NoneTypeInfo
+
+
+def test_merge_observations_aborts_on_line_shifted_twin():
+    """Two .rt files recorded against different source revisions of the same
+    function produce FuncInfo entries with identical (file_name, func_name)
+    but different ``first_code_line``. The dict-key-based merge would silently
+    keep both entries as orphans, with the downstream emitter selecting one
+    and discarding the other's traces. Detect this and raise a loud error
+    pointing at the offending function.
+
+    Regression: a deployment-study session ran ``process --output-files``
+    against an editable tqdm install between two ``--only-collect`` runs.
+    The annotation rewrite shifted line numbers, so the second ``.rt``'s
+    CodeIds drifted from the first's. The merge silently dropped the
+    second .rt's wider observations and emitted the narrower annotation.
+    """
+    from righttyper.observations import (
+        Observations, FuncInfo, ArgInfo,
+    )
+    from righttyper.righttyper_types import (
+        ArgumentName, CodeId, Filename, FunctionName,
+    )
+
+    args = (
+        ArgInfo(ArgumentName("self"), None),
+        ArgInfo(ArgumentName("x"), None),
+    )
+    # Identical bytecode_hash → same content; different first_code_line
+    # → genuine source-revision drift.
+    fid_pre = CodeId(Filename("m.py"), FunctionName("Cls.method"), 61, 0xCAFE)
+    fid_post = CodeId(Filename("m.py"), FunctionName("Cls.method"), 57, 0xCAFE)
+
+    obs1 = Observations()
+    obs1.func_info[fid_pre] = FuncInfo(
+        code_id=fid_pre, args=args, varargs=None, kwargs=None,
+    )
+    obs2 = Observations()
+    obs2.func_info[fid_post] = FuncInfo(
+        code_id=fid_post, args=args, varargs=None, kwargs=None,
+    )
+
+    import pytest
+    with pytest.raises(ValueError) as exc_info:
+        obs1.merge_observations(obs2)
+
+    msg = str(exc_info.value)
+    # Error must be actionable: name the function and both line numbers.
+    assert "Cls.method" in msg
+    assert "m.py" in msg
+    assert "61" in msg
+    assert "57" in msg
+
+
+def test_merge_observations_accepts_nested_lambda_at_different_lines():
+    """Two ``<lambda>`` expressions nested in the same enclosing function
+    (qualname ``Outer.<locals>.<lambda>``) can legitimately appear at
+    different lines with the same parameter shape — they're distinct
+    callable values, not a line-shifted version of one another.
+    The synthetic check must look at the trailing qualname segment, not
+    only the first character.
+
+    Regression: tqdm's ``_decr_instances`` has two
+    ``Outer.<locals>.<lambda>`` callables at different lines, both with
+    parameter ``(inst,)``. The first-pass detection raised on them."""
+    from righttyper.observations import (
+        Observations, FuncInfo, ArgInfo,
+    )
+    from righttyper.righttyper_types import (
+        ArgumentName, CodeId, Filename, FunctionName,
+    )
+
+    nested_name = FunctionName("tqdm._decr_instances.<locals>.<lambda>")
+    # Distinct callable values ⇒ different bytecode_hash.
+    fid_a = CodeId(Filename("m.py"), nested_name, 708, 0xAAAA)
+    fid_b = CodeId(Filename("m.py"), nested_name, 712, 0xBBBB)
+    args = (ArgInfo(ArgumentName("inst"), None),)
+
+    obs1 = Observations()
+    obs1.func_info[fid_a] = FuncInfo(
+        code_id=fid_a, args=args, varargs=None, kwargs=None,
+    )
+    obs2 = Observations()
+    obs2.func_info[fid_b] = FuncInfo(
+        code_id=fid_b, args=args, varargs=None, kwargs=None,
+    )
+
+    # Must not raise — distinct nested lambdas are legitimate.
+    obs1.merge_observations(obs2)
+    assert fid_a in obs1.func_info
+    assert fid_b in obs1.func_info
+
+
+def test_merge_observations_accepts_property_getter_setter_pair():
+    """A property getter and setter share ``func_name`` but live at
+    distinct lines with different parameter shapes (``(self,)`` vs
+    ``(self, value)``). The line-shift detector must not flag this as
+    a source-revision conflict.
+
+    Concretely: tqdm's ``Bar.colour`` has a getter at one line and a
+    setter at another. Pytest may exercise the getter while a separate
+    exercise script exercises the setter — both .rt files are valid and
+    must merge cleanly.
+    """
+    from righttyper.observations import (
+        Observations, FuncInfo, ArgInfo,
+    )
+    from righttyper.righttyper_types import (
+        ArgumentName, CodeId, Filename, FunctionName,
+    )
+
+    # Distinct bodies ⇒ different bytecode_hash.
+    getter_id = CodeId(Filename("m.py"), FunctionName("Cls.prop"), 100, 0x1111)
+    setter_id = CodeId(Filename("m.py"), FunctionName("Cls.prop"), 104, 0x2222)
+
+    obs1 = Observations()
+    obs1.func_info[getter_id] = FuncInfo(
+        code_id=getter_id,
+        args=(ArgInfo(ArgumentName("self"), None),),
+        varargs=None, kwargs=None,
+    )
+    obs2 = Observations()
+    obs2.func_info[setter_id] = FuncInfo(
+        code_id=setter_id,
+        args=(ArgInfo(ArgumentName("self"), None),
+              ArgInfo(ArgumentName("value"), None)),
+        varargs=None, kwargs=None,
+    )
+
+    # Must not raise — different arities disambiguate them.
+    obs1.merge_observations(obs2)
+    assert getter_id in obs1.func_info
+    assert setter_id in obs1.func_info
+
+
+def test_merge_observations_accepts_named_closures_at_different_lines():
+    """Two *named* closures (qualname like ``Outer.<locals>.view``) defined
+    in different branches of the same enclosing function may share parameter
+    shape. They are distinct callable values, not source-revision drift —
+    the bytecode hash discriminates them.
+
+    Regression: flask's ``View.as_view`` defines two ``def view(**kwargs):``
+    closures in adjacent branches of an ``if`` statement (lines 56 and 65 in
+    flask/views.py), both with the same signature. The earlier
+    signature-shape-based detector flagged this as drift and aborted the
+    merge, discarding all flask observations.
+    """
+    from righttyper.observations import (
+        Observations, FuncInfo, ArgInfo,
+    )
+    from righttyper.righttyper_types import (
+        ArgumentName, CodeId, Filename, FunctionName,
+    )
+
+    closure_name = FunctionName("View.as_view.<locals>.view")
+    # Distinct closure bodies ⇒ different bytecode_hash.
+    fid_a = CodeId(Filename("views.py"), closure_name, 56, 0xAAAA)
+    fid_b = CodeId(Filename("views.py"), closure_name, 65, 0xBBBB)
+    args = ()
+
+    obs1 = Observations()
+    obs1.func_info[fid_a] = FuncInfo(
+        code_id=fid_a, args=args,
+        varargs=None, kwargs=ArgumentName("kwargs"),
+    )
+    obs2 = Observations()
+    obs2.func_info[fid_b] = FuncInfo(
+        code_id=fid_b, args=args,
+        varargs=None, kwargs=ArgumentName("kwargs"),
+    )
+
+    # Must not raise — distinct closures with different content are legitimate.
+    obs1.merge_observations(obs2)
+    assert fid_a in obs1.func_info
+    assert fid_b in obs1.func_info
+
+
+def test_merge_observations_aborts_on_named_closure_drift():
+    """A named closure with identical bytecode appearing at different lines
+    across .rt files IS genuine source-revision drift and must raise — the
+    closure didn't change shape, the source was rewritten between collects.
+    """
+    from righttyper.observations import (
+        Observations, FuncInfo, ArgInfo,
+    )
+    from righttyper.righttyper_types import (
+        ArgumentName, CodeId, Filename, FunctionName,
+    )
+
+    closure_name = FunctionName("View.as_view.<locals>.view")
+    # Identical bytecode_hash at different lines ⇒ drift.
+    fid_pre = CodeId(Filename("views.py"), closure_name, 56, 0xCAFE)
+    fid_post = CodeId(Filename("views.py"), closure_name, 65, 0xCAFE)
+    args = ()
+
+    obs1 = Observations()
+    obs1.func_info[fid_pre] = FuncInfo(
+        code_id=fid_pre, args=args,
+        varargs=None, kwargs=ArgumentName("kwargs"),
+    )
+    obs2 = Observations()
+    obs2.func_info[fid_post] = FuncInfo(
+        code_id=fid_post, args=args,
+        varargs=None, kwargs=ArgumentName("kwargs"),
+    )
+
+    import pytest
+    with pytest.raises(ValueError) as exc_info:
+        obs1.merge_observations(obs2)
+
+    msg = str(exc_info.value)
+    assert "View.as_view.<locals>.view" in msg
+    assert "views.py" in msg
+    assert "56" in msg
+    assert "65" in msg
+
+
+def test_merge_observations_accepts_genexprs_with_identical_bytecode():
+    """Two ``<genexpr>`` callables nested in the same enclosing function
+    frequently share *body* bytecode — Python compiles a genexp
+    ``(expr for var in iterable)`` so the iterable is passed as the
+    parameter ``.0`` rather than referenced from the body, leaving only
+    the per-element computation in the body.  Two physically distinct
+    genexps with the same per-element shape therefore produce identical
+    ``bytecode_hash``.
+
+    Regression: black's ``get_features_used`` contains two ``any(child.type ==
+    syms.star_expr for child in <iterable>)`` calls, lines 1228 and 1263.
+    The drift check raised on them and discarded all of black's recorded
+    observations.  Synthetic functions must be exempt from drift detection.
+    """
+    from righttyper.observations import (
+        Observations, FuncInfo, ArgInfo,
+    )
+    from righttyper.righttyper_types import (
+        ArgumentName, CodeId, Filename, FunctionName,
+    )
+
+    genexp_name = FunctionName("get_features_used.<locals>.<genexpr>")
+    # Identical bytecode_hash at different lines — synthetic case.
+    fid_a = CodeId(Filename("black.py"), genexp_name, 1228, 0xABCD)
+    fid_b = CodeId(Filename("black.py"), genexp_name, 1263, 0xABCD)
+    args = (ArgInfo(ArgumentName(".0"), None),)
+
+    obs1 = Observations()
+    obs1.func_info[fid_a] = FuncInfo(
+        code_id=fid_a, args=args, varargs=None, kwargs=None,
+    )
+    obs2 = Observations()
+    obs2.func_info[fid_b] = FuncInfo(
+        code_id=fid_b, args=args, varargs=None, kwargs=None,
+    )
+
+    # Must not raise — synthetics with identical bytecode at different
+    # lines are legitimate distinct genexp sites, not drift.
+    obs1.merge_observations(obs2)
+    assert fid_a in obs1.func_info
+    assert fid_b in obs1.func_info
+
+
+def test_resolve_container_snapshot_handles_self_reference():
+    """A self-aliasing container (e.g., httpx response.request → response,
+    or any object that contains itself transitively) produces a
+    ContainerSamples entry whose ``resolved_samples()`` includes a
+    TypeInfo tagged with the same ``container_id`` as the outer container.
+
+    Without a cycle guard in the resolver, the visitor descends into that
+    inner TypeInfo, re-resolves the same cid back to the same args, and
+    recurses forever — observed as RecursionError during the httpx pytest
+    suite. The resolver must short-circuit re-entry on a cid currently
+    being resolved up the stack.
+    """
+    from righttyper.recorder import _ResolveContainerSnapshotT
+    from righttyper.typeinfo import TypeInfo
+
+    cid = 42
+
+    class FakeEntry:
+        def resolved_samples(self):
+            # Inner TypeInfo carries the same cid as the outer — the
+            # self-reference. Returned as the single element-type arg.
+            inner = TypeInfo.from_type(dict, args=(), container_id=cid)
+            return (inner,)
+
+    cid_to_entry = {cid: FakeEntry()}
+    outer = TypeInfo.from_type(dict, args=(), container_id=cid)
+
+    # Must terminate (no RecursionError).
+    resolver = _ResolveContainerSnapshotT(cid_to_entry)
+    result = resolver.visit(outer)
+
+    # Result should be a finite TypeInfo — the outer dict with its
+    # element-args refreshed once.
+    assert result is not None
+    assert result.container_id == cid
 
 
 def test_sample_until_stable_lifetime_budget(monkeypatch):

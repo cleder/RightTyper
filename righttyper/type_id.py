@@ -30,6 +30,7 @@ import types
 from typing import Any, cast, get_type_hints, get_origin, get_args, TypeGuard
 import typing
 
+from righttyper.atomic import AtomicCounter
 from righttyper.random_dict import RandomDict
 from righttyper.typeinfo import TypeInfo, TypeInfoArg, NoneTypeInfo, AnyTypeInfo, UnknownTypeInfo
 from righttyper.righttyper_types import Filename, FunctionName, CodeId, CallableWithCode, has_code
@@ -389,6 +390,14 @@ def _first_referent(value: Any) -> object|None:
     return ref[0] if len(ref) else None
 
 
+# Monotonic counter for ``ContainerSamples.cid``: stable identifiers that,
+# unlike Python's ``id()``, never reuse values for distinct objects.
+# TypeInfos store this cid (as ``container_id``) so the resolve at
+# recording end can't be tricked by id-reuse-after-GC into pulling a
+# different (later-allocated) container's resolved snapshot.
+_cid_counter = AtomicCounter()
+
+
 class ContainerSamples:
     """Tracks type samples from a container for type inference.
 
@@ -398,6 +407,7 @@ class ContainerSamples:
     """
 
     def __init__(self, o: object, n_counters: int):
+        self.cid = _cid_counter.inc()
         self.o = o
         self.n_counters = n_counters
         # Cumulative counters: all types ever seen (for final annotation)
@@ -405,15 +415,67 @@ class ContainerSamples:
         self.last_sampled_size = 0
         # Set by sample_until_stable on Good-Turing convergence
         self.last_singleton_ratios: list[float] = []
+        # Cached recording-time view; ``None`` means stale.  Invalidated
+        # on every mutation of ``all_samples``.  ``sample_view()`` is read
+        # once per ``_sample_container`` call after all mutations of that
+        # call, so over-invalidating within a call costs nothing — the
+        # win is the cross-call cache (spot_check_miss / empty-container
+        # paths, where ``all_samples`` is untouched).
+        self._sample_view: tuple[TypeInfo, ...] | None = None
 
     def add_sample(self, sample: tuple[TypeInfo, ...]) -> None:
         """Add a sample to cumulative history."""
+        self._sample_view = None
         for c, v in zip(self.all_samples, sample):
             c[v] += 1
+
+    def sample_view(self) -> tuple[TypeInfo, ...]:
+        """Cheap recording-time view: per-counter union over ``all_samples``.
+        Cached; rebuilt only when a sample introduced a new TypeInfo."""
+        if self._sample_view is None:
+            self._sample_view = tuple(TypeInfo.from_set(set(c)) for c in self.all_samples)
+        return self._sample_view
 
     def has_new_type(self, sample: tuple[TypeInfo, ...]) -> bool:
         """Check if sample contains a type not seen before."""
         return any(v not in counter for v, counter in zip(sample, self.all_samples))
+
+    def resolved_samples(self) -> tuple[TypeInfo, ...]:
+        """One merged TypeInfo per counter — this container's current
+        per-counter element types, with progressive snapshots of any
+        inner container collapsed to a single representative.
+
+        For each parametric element in ``all_samples``, the element's
+        ``container_id`` uniquely identifies its physical inner container.
+        Progressive snapshots of the same inner share the same cid (and
+        outer shape) and differ only in args — so picking one tagged
+        representative per cid is enough.  The finish-time resolver
+        visits each representative and overwrites its args via the
+        inner's own ``resolved_samples()``, so the args we keep are
+        scratch.
+
+        Scalars (``container_id is None``) pass through unchanged.
+
+        Lub-reduced via ``merged_types`` so numeric-tower (``int <:
+        float``) and MRO-subtype (``bool <: int``) redundancies collapse
+        before the outer wrap."""
+        from righttyper.generalize import merged_types
+
+        def _reduce(s: set[TypeInfo]) -> TypeInfo:
+            return next(iter(s)) if len(s) == 1 else merged_types(s)
+
+        out: list[TypeInfo] = []
+        for samples in self.all_samples:
+            seen_cids: set[int] = set()
+            deduped: set[TypeInfo] = set()
+            for ti in samples:
+                if (cid := ti.container_id) is None:
+                    deduped.add(ti)
+                elif cid not in seen_cids:
+                    seen_cids.add(cid)
+                    deduped.add(ti)
+            out.append(_reduce(deduped))
+        return tuple(out)
 
     def sample_until_stable(self, sampler: abc.Callable[[], tuple[Any, ...]], depth: int) -> str:
         """Sample until Good-Turing indicates stability or the per-container
@@ -441,8 +503,10 @@ class ContainerSamples:
                 )
                 return 'max_limit'
 
-            sample = tuple(get_value_type(v, depth+1) for v in sampler())
+            raw_sample = sampler()
+            sample = tuple(get_value_type(v, depth+1) for v in raw_sample)
             # Add to cumulative history
+            self._sample_view = None
             for c, v in zip(self.all_samples, sample):
                 c[v] += 1
             # Add to cycle-local counter
@@ -469,7 +533,9 @@ class ContainerSamples:
                 self.add_sample((get_value_type(v, depth+1),))
         else:
             for k, v in container.items():
-                self.add_sample((get_value_type(k, depth+1), get_value_type(v, depth+1)))
+                self.add_sample(
+                    (get_value_type(k, depth+1), get_value_type(v, depth+1)),
+                )
         self.last_sampled_size = len(container)
 
     def compute_ground_truth(self, container: Any, depth: int) -> tuple[Counter[TypeInfo], ...]:
@@ -506,18 +572,24 @@ class ContainerTypeCache:
 
 _cache = ContainerTypeCache(1024)
 
-def _get_container_args(
+def _sample_container(
     container: Any,
     n_counters: typing.Literal[1,2],
     sampler: abc.Callable[[], tuple[TypeInfo, ...]],
-    depth: int
+    depth: int,
 ) -> tuple[TypeInfo, ...]:
+    """Sample ``container``'s contents into its ``ContainerSamples`` cache
+    entry; return the per-counter merged element TypeInfos (one per
+    counter — the caller wraps with its desired outer container
+    type)."""
 
     entry = _cache.get(container, n_counters)
     action = "skip"
     stopping_reason: str | None = None
     sample_trigger: str | None = None
     n_samples_before = 0
+    current_size = 0
+    is_small = False
 
     if run_options.log_sampling:
         n_samples_before = entry.all_samples[0].total()
@@ -534,7 +606,8 @@ def _get_container_args(
                 action = "full_scan"
             elif random.random() < run_options.container_check_probability:
                 # Spot-check: take one sample, rescan if new type found
-                sample = tuple(get_value_type(v, depth+1) for v in sampler())
+                raw_sample = sampler()
+                sample = tuple(get_value_type(v, depth+1) for v in raw_sample)
                 if entry.has_new_type(sample):
                     entry.full_scan(container, depth)
                     action = "spot_check_hit"
@@ -549,7 +622,8 @@ def _get_container_args(
                 action = "sample"
             elif random.random() < run_options.container_check_probability:
                 # Spot-check: resample only if new type found
-                sample = tuple(get_value_type(v, depth+1) for v in sampler())
+                raw_sample = sampler()
+                sample = tuple(get_value_type(v, depth+1) for v in raw_sample)
                 if entry.has_new_type(sample):
                     entry.add_sample(sample)
                     stopping_reason = entry.sample_until_stable(sampler, depth)
@@ -558,8 +632,6 @@ def _get_container_args(
                     sample_trigger = "spot_check"
                 else:
                     action = "spot_check_miss"
-
-    result = tuple(TypeInfo.from_set(set(c)) for c in entry.all_samples)
 
     if run_options.log_sampling and container:
         n_samples_after = entry.all_samples[0].total()
@@ -626,7 +698,7 @@ def _get_container_args(
         sampling_logger.info(json.dumps(record, default=str))
         update_sampling_summary(record)
 
-    return result
+    return entry.sample_view()
 
 
 def _handle_tuple(value: Any, depth: int) -> TypeInfo:
@@ -645,36 +717,47 @@ def _handle_tuple(value: Any, depth: int) -> TypeInfo:
     return TypeInfo.from_type(tuple, args=args)
 
 
+def _cid_for(container: Any) -> int | None:
+    """``ContainerSamples.cid`` for an observed container, or ``None`` if
+    no cache entry is currently mapped to its id."""
+    e = _cache._cache.get(id(container))
+    return e.cid if e is not None and e.o is container else None
+
+
 def _handle_dict(value: Any, depth: int) -> TypeInfo:
     sampler = lambda: ((el := _random_item(value)), value[el])
-    args = _get_container_args(value, 2, sampler, depth)
-
+    args = _sample_container(value, 2, sampler, depth)
     t: type = type(value)
     if (ti := _BUILTINS.get(t)):
-        return ti.replace(args=args)
-
-    return TypeInfo.from_type(t, args=args)
+        return ti.replace(args=args, container_id=_cid_for(value))
+    return TypeInfo.from_type(t, args=args, container_id=_cid_for(value))
 
 
 def _handle_randomdict(value: Any, depth: int) -> TypeInfo:
     sampler = lambda: ((el := value.random_item())[0], el[1])
-
     try:
-        args = _get_container_args(value, 2, sampler, depth)
-    except Exception as e:
+        args = _sample_container(value, 2, sampler, depth)
+    except Exception:
         return TypeInfo.from_type(dict)
-    else:
-        return TypeInfo.from_type(dict, args=args)
+    return TypeInfo.from_type(dict, args=args, container_id=_cid_for(value))
 
 
 def _handle_list(value: Any, depth: int) -> TypeInfo:
     sampler = lambda: (value[random.randint(0, len(value)-1)],) # this is O(1), much faster than islice()
-    return TypeInfo.from_type(list, args=_get_container_args(value, 1, sampler, depth))
+    return TypeInfo.from_type(
+        list,
+        args=_sample_container(value, 1, sampler, depth),
+        container_id=_cid_for(value),
+    )
 
 
 def _handle_set(value: Any, depth: int) -> TypeInfo:
     sampler = lambda: (_random_item(value),)
-    return TypeInfo.from_type(type(value), args=_get_container_args(value, 1, sampler, depth))
+    return TypeInfo.from_type(
+        type(value),
+        args=_sample_container(value, 1, sampler, depth),
+        container_id=_cid_for(value),
+    )
 
 
 def _handle_dict_keyiter(value: Any, depth: int) -> TypeInfo|None:
@@ -712,7 +795,11 @@ def _handle_set_iter(value: Any, depth: int) -> TypeInfo|None:
 def _handle_tuple_iter(value: Any, depth: int) -> TypeInfo|None:
     if type(t := _first_referent(value)) is tuple:
         sampler = lambda: (t[random.randint(0, len(t)-1)],) # this is O(1), much faster than islice()
-        return TypeInfo.from_type(abc.Iterator, args=_get_container_args(t, 1, sampler, depth))
+        return TypeInfo.from_type(
+            abc.Iterator,
+            args=_sample_container(t, 1, sampler, depth),
+            container_id=_cid_for(t),
+        )
     return None
 
 

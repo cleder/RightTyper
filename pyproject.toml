@@ -55,7 +55,8 @@ dependencies = [
     "rich >= 13.7.1",
     "wcmatch >= 10.0",
     "typeshed_client >= 2.7.0",
-    "dill >= 0.4.0"
+    "dill >= 0.4.0",
+    "slipcover >= 1.0.16"
 ]
 	 
 description = "A fast runtime type hint assistant for Python code."

@@ -22,7 +22,7 @@ from righttyper.type_transformers import (
     LoadTypeObjT
 )
 from righttyper.typeinfo import TypeInfo, TypeInfoArg, UnknownTypeInfo, UnionTypeInfo, CallTrace
-from righttyper.righttyper_types import ArgumentName, VariableName, Filename, CodeId
+from righttyper.righttyper_types import ArgumentName, FunctionName, VariableName, Filename, CodeId, FuncLoc
 from righttyper.annotation import FuncAnnotation, ModuleVars, TraceDistribution
 from righttyper.type_id import PostponedArg0, get_type_name
 from righttyper.typeshed import get_typeshed_func_signature
@@ -541,8 +541,67 @@ class Observations:
                 ct_dict[var_name] = set(tr.visit(t) for t in ct_types)
 
 
+    def _check_line_shifted_conflict(self, obs2: "Observations") -> None:
+        """Refuse to merge .rt files that come from different source revisions.
+
+        Two FuncInfos sharing ``(file_name, bytecode_hash)`` at distinct
+        ``first_code_line`` values were recorded against versions of the
+        same source file whose line numbers differ (e.g. one before and
+        one after ``process --output-files`` rewrote annotations) — the
+        bytecode is identical but the function moved. Merging them
+        silently would attribute observations to the wrong source
+        location.
+
+        Different bodies at different lines (e.g. property
+        getter/setter, or two named closures in adjacent branches of one
+        enclosing function) hash to different ``bytecode_hash`` values
+        and don't collide here.
+
+        Synthetic functions (``<lambda>``, ``<listcomp>``, ``<genexpr>``,
+        ``<dictcomp>``, ``<setcomp>``) are exempt: Python compiles a
+        genexp / comprehension so the iterable is passed in as ``.0``
+        rather than referenced from the body, so two physically distinct
+        synthetics in the same enclosing function frequently share body
+        bytecode.  They are distinct sites, not drift.
+        """
+        if not self.func_info or not obs2.func_info:
+            return
+
+        def is_synthetic(name: "FunctionName") -> bool:
+            return name.startswith("<") or name.rsplit(".", 1)[-1].startswith("<")
+
+        def lines_by_content(
+            obs: "Observations",
+        ) -> dict[tuple["Filename", int], tuple[int, "FunctionName"]]:
+            out: dict[tuple["Filename", int], tuple[int, "FunctionName"]] = {}
+            for fi in obs.func_info.values():
+                if is_synthetic(fi.code_id.func_name):
+                    continue
+                key = (fi.code_id.file_name, fi.code_id.bytecode_hash)
+                out[key] = (fi.code_id.first_code_line, fi.code_id.func_name)
+            return out
+
+        lines1 = lines_by_content(self)
+        for key, (l2, _name2) in lines_by_content(obs2).items():
+            entry = lines1.get(key)
+            if entry is None or entry[0] == l2:
+                continue
+            l1, name1 = entry
+            file_name = key[0]
+            raise ValueError(
+                f"Refusing to merge: {name1!r} in {file_name} has "
+                f"first_code_line {l1} in one observation set and {l2} "
+                f"in the other (identical bytecode). The .rt files were "
+                f"recorded against different source revisions (often "
+                f"because ``process --output-files`` rewrote annotations "
+                f"between collections). Remedy: delete righttyper-*.rt "
+                f"and re-collect against a consistent source state."
+            )
+
     def merge_observations(self, obs2: "Observations") -> None:
         """Merges other observations into this one."""
+
+        self._check_line_shifted_conflict(obs2)
 
         for func_id, func_info2 in obs2.func_info.items():
             if (func_info := self.func_info.get(func_id)):
@@ -590,10 +649,14 @@ class Observations:
                                          f"    {a2.arg_name}"
                         )
                 if args1 != args2:
+                    # Empty default set → no-default arg; preserve Python None.
                     func_info.args = tuple(
                         ArgInfo(
                             a1.arg_name,
-                            TypeInfo.from_set({d for d in (a1.default, a2.default) if d is not None}, empty_is_none=True)
+                            TypeInfo.from_set(
+                                {d for d in (a1.default, a2.default) if d is not None},
+                                on_empty=None,
+                            )
                         )
                         for a1, a2 in zip(args1, args2)
                     )
@@ -802,6 +865,7 @@ class Observations:
         # process this trace, any nested Callable/Generator code_ids it contains
         # have ready annotations. This lets the Self detection below recurse
         # into resolved types (e.g., a lambda's retval that matches self_class).
+        resolver: ResolvingT | None = None
         if annotations:
             resolver = ResolvingT(
                 annotations,
@@ -873,8 +937,8 @@ class Observations:
         variables = {
             var_name: _apply_constructor_type(
                 merged_types(
-                    {resolver.visit(t) for t in var_types} if annotations else var_types,
-                    for_variable=True,
+                    {resolver.visit(t) for t in var_types} if resolver is not None else var_types,
+                    assume_covariant=True,
                     accessed_attributes=accessed_attributes.get(var_name) if accessed_attributes else None,
                 ),
                 func_info.constructor_types.get(var_name, set()),
@@ -963,7 +1027,7 @@ class Observations:
         return result
 
 
-    def collect_annotations(self) -> tuple[dict[CodeId, FuncAnnotation], dict[Filename, ModuleVars], dict[CodeId, list[TraceDistribution]]]:
+    def collect_annotations(self) -> tuple[dict[FuncLoc, FuncAnnotation], dict[Filename, ModuleVars], dict[FuncLoc, list[TraceDistribution]]]:
         """Collects function type annotations from the observed types."""
 
         accessed_attrs = self.accessed_attributes
@@ -990,7 +1054,7 @@ class Observations:
                 var_name: _apply_constructor_type(
                     mv_resolver.visit(merged_types(
                         var_types,
-                        for_variable=True,
+                        assume_covariant=True,
                         accessed_attributes=module_accessed.get(filename, {}).get(var_name) or None,
                     )),
                     self.module_constructor_types.get(filename, {}).get(var_name, set()),
@@ -1100,7 +1164,11 @@ class Observations:
 
         transform_types(MakePickleableT())
 
-        return annotations, module_vars, type_distributions
+        return (
+            {c.to_loc(): a for c, a in annotations.items()},
+            module_vars,
+            {c.to_loc(): d for c, d in type_distributions.items()},
+        )
 
 
 class LoadAndCheckTypesT(LoadTypeObjT):

@@ -38,7 +38,7 @@ from righttyper.righttyper_tool import (
 import righttyper.loader as loader
 from righttyper.righttyper_utils import detected_test_modules
 from righttyper.typeinfo import TypeInfo
-from righttyper.righttyper_types import CodeId, Filename, FunctionName
+from righttyper.righttyper_types import Filename, FuncLoc, FunctionName
 from righttyper.annotation import FuncAnnotation, ModuleVars, TraceDistribution
 from righttyper.observations import Observations
 from righttyper.recorder import ObservationsRecorder
@@ -48,7 +48,7 @@ from righttyper.atomic import AtomicCounter
 
 
 PKL_FILE_NAME = TOOL_NAME+"-{N}.rt"
-PKL_FILE_VERSION = 7
+PKL_FILE_VERSION = 9
 
 
 rec = ObservationsRecorder()
@@ -311,10 +311,10 @@ def output_changes(
 
 def emit_json(
     files: list[tuple[Filename, str]],
-    type_annotations: dict[CodeId, FuncAnnotation],
+    type_annotations: dict[FuncLoc, FuncAnnotation],
     module_vars: dict[Filename, ModuleVars],
     code_changes: list[CodeChanges],
-    type_distributions: dict[CodeId, list[TraceDistribution]] | None = None
+    type_distributions: dict[FuncLoc, list[TraceDistribution]] | None = None
 ) -> dict[str, Any]:
 
     file2module = {file: module for file, module in files}
@@ -424,9 +424,9 @@ def process_file_wrapper(args) -> CodeChanges:
 
 def process_files(
     files: list[tuple[Filename, str]],
-    type_annotations: dict[CodeId, FuncAnnotation],
+    type_annotations: dict[FuncLoc, FuncAnnotation],
     module_vars: dict[Filename, ModuleVars],
-    type_distributions: dict[CodeId, list[TraceDistribution]] | None = None
+    type_distributions: dict[FuncLoc, list[TraceDistribution]] | None = None
 ) -> list[CodeChanges]:
     if not files:
         return []
@@ -705,6 +705,13 @@ def add_output_options(group=None):
                 default=output_options.use_constructor_types,
                 help="""Whether to use a variable's source-level constructor or factory call (e.g., `p = Path("/tmp")` or `p = Path.cwd()`) as its annotation, when the observed runtime type is consistent with the call's declared return.""",
             ),
+            base.option(
+                "--with-coverage/--no-with-coverage",
+                is_flag=True,
+                default=output_options.with_coverage,
+                help="Capture branch and line coverage (using SlipCover) to identify "
+                     "exercise-driver gaps behind degenerate annotations.",
+            ),
         ]):
             func = opt(func)
         return func
@@ -765,6 +772,15 @@ def add_output_options(group=None):
     type=click.FloatRange(0.1, None),
     default=run_options.poisson_sample_rate,
     help="Expected sample captures per second (Poisson process rate).",
+)
+@click.option(
+    "--poisson-warmup-samples",
+    type=click.IntRange(0, None),
+    default=run_options.poisson_warmup_samples,
+    help="Capture this many initial calls per function before Poisson "
+         "sampling kicks in. Higher values catch rare per-call variants "
+         "(e.g. exception paths through __exit__) that the sampler may "
+         "otherwise miss; lower is faster.",
 )
 @click.option(
     "--call-sampling/--no-call-sampling",
@@ -954,6 +970,13 @@ def run(
     run_options.process_args(kwargs)
     output_options.process_args(kwargs)
 
+    if output_options.with_coverage:
+        from righttyper import coverage as rt_coverage
+        try:
+            rt_coverage.enable(source=run_options.script_dir)
+        except rt_coverage.CoverageSetupError as e:
+            raise click.UsageError(str(e))
+
     if run_options.log_sampling:
         from righttyper.logger import init_sampling_log
         init_sampling_log()
@@ -1016,6 +1039,11 @@ def run(
                     'script': Path(script).resolve(),
                     'observations': obs,
                 }
+                if output_options.with_coverage:
+                    from righttyper import coverage as rt_coverage
+                    snap = rt_coverage.snapshot()
+                    if snap is not None:
+                        collected['coverage'] = snap
 
                 index = 1
                 while True:
@@ -1081,7 +1109,9 @@ def process(**kwargs):
     output_options.process_args(kwargs)
 
     obs_list = []
+    coverage_total: dict | None = None
     script = None
+    pkl: dict = {}
     for filename in Path('.').glob(PKL_FILE_NAME.format(N='*')):
         with filename.open("rb") as f:
             pkl = pickle.load(f)
@@ -1097,6 +1127,13 @@ def process(**kwargs):
 
             # TODO check for compatible options?
             obs_list.append(pkl['observations'])
+
+            if output_options.with_coverage and 'coverage' in pkl:
+                if coverage_total is None:
+                    coverage_total = pkl['coverage']
+                else:
+                    from slipcover import merge_coverage
+                    coverage_total = merge_coverage(coverage_total, pkl['coverage'])
 
     if not obs_list:
         print("Error: No files found")
@@ -1125,6 +1162,10 @@ def process(**kwargs):
     from righttyper.type_transformers import LoadTypeObjT
     obs.transform_types(LoadTypeObjT())
     process_obs(obs)
+
+    if output_options.with_coverage:
+        from righttyper import diagnostics
+        diagnostics.emit(obs, coverage_total, Path(diagnostics.ARTIFACT_NAME))
 
 
 @cli.command()

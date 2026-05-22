@@ -15,8 +15,12 @@ class AtomicCounter:
         self._count = itertools.count()
         self._last = 0
 
-    def inc(self) -> None:
-        next(self._count)
+    def inc(self) -> int:
+        """Increment and return the new value (the count *before* this
+        call, since ``itertools.count`` starts at 0 and yields then
+        advances).  Callers using this only as a side-effecting increment
+        can ignore the return."""
+        return next(self._count)
 
     def count_and_clear(self) -> int:
         # This operation isn't, by itself, atomic, but safe as long as only one thread

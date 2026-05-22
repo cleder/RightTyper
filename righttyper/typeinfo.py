@@ -1,5 +1,5 @@
 import typing
-from typing import Iterator, Iterable, Final, Callable, Any, cast
+from typing import Iterator, Iterable, Final, Callable, Any, cast, overload
 import types
 from dataclasses import dataclass, fields, replace, field
 from righttyper.righttyper_types import CodeId
@@ -7,10 +7,23 @@ from righttyper.righttyper_utils import normalize_module_name
 
 
 # The typing module does not define a type for such "typing special forms".
-type SpecialForms = typing.Any|typing.Never
+# from_type accepts both regular types and special forms like typing.Any,
+# typing.Never, typing.NoReturn, typing.Self, typing.Callable, typing.Union,
+# and typing.Optional. There isn't a good way to narrow to just these:
+# mypy and pyright disagree on how to model them, and any union containing
+# typing.Any collapses to Any anyway. The alias is kept for documentation.
+type SpecialForms = typing.Any
 
 # What is allowed in TypeInfo.args
 type TypeInfoArg = TypeInfo|str|types.EllipsisType|tuple[()]
+
+
+# Sentinel for ``TypeInfo.from_set``'s ``on_empty`` parameter to
+# distinguish "caller didn't specify what to return on empty input"
+# from "caller wants Python ``None`` returned." Defaulting directly to
+# ``TypeInfo.from_type(typing.Never)`` isn't possible because ``TypeInfo``
+# isn't yet bound at class-body evaluation time.
+_UNSET: Any = object()
 
 
 @dataclass(eq=True, frozen=True)
@@ -32,6 +45,16 @@ class TypeInfo:
     # Type pattern index (>0), when a pattern is detected.  Only UnionTypeInfo should have these.
     # Multiple can occur in a function call, in different order, so include in comparisons.
     typevar_index: int = field(default=0, compare=True)
+
+    # ``id()`` of the Python container that produced this TypeInfo, when
+    # one was sampled (set in the relevant ``_handle_*`` handlers in
+    # ``type_id``).  Excluded from comparison so two TypeInfos with the
+    # same shape but different container ids still hash/eq equal in
+    # ``Counter[CallTrace]`` dedup.  Consumed at recording end by the
+    # transformer that rewrites trace TypeInfos to each container's
+    # resolved-latest snapshot from ``ContainerTypeCache``; cleared post-
+    # rewrite (so it never reaches the ``.rt`` pickle).
+    container_id: int | None = field(default=None, compare=False)
 
 
     @staticmethod
@@ -93,16 +116,40 @@ class TypeInfo:
         )
 
 
+    @overload
     @staticmethod
-    def from_set(s: "set[TypeInfo]", empty_is_none=False, **kwargs: Any) -> "TypeInfo":
+    def from_set(s: "set[TypeInfo]", **kwargs: Any) -> "TypeInfo": ...
+    @overload
+    @staticmethod
+    def from_set(s: "set[TypeInfo]", on_empty: "TypeInfo", **kwargs: Any) -> "TypeInfo": ...
+    @overload
+    @staticmethod
+    def from_set(s: "set[TypeInfo]", on_empty: None, **kwargs: Any) -> "TypeInfo | None": ...
+
+    @staticmethod
+    def from_set(s: "set[TypeInfo]", on_empty: Any = _UNSET,
+                 **kwargs: Any) -> "TypeInfo | None":
         """Form a union from a set, with simplification.
 
         Expands nested unions, subsumes Any, removes Never/NoReturn,
         cleans up Never-generics, caps oversized unions, and sorts
         for deterministic output.
+
+        ``on_empty`` controls what to return when ``s`` is empty:
+
+        - default (unset): ``typing.Never`` TypeInfo — appropriate for
+          "no observations contribute here, leave as the union identity."
+        - ``NoneTypeInfo``: appropriate for slots where empty really means
+          the type is ``None`` (e.g. a generator that never yielded).
+        - Python ``None``: signals "no information" — return the
+          sentinel rather than a type. Callers that hold a
+          ``TypeInfo | None`` field (e.g. ``ArgInfo.default``) use this.
+        - Any other ``TypeInfo``: returned as-is.
         """
         if not s:
-            return NoneTypeInfo if empty_is_none else TypeInfo.from_type(typing.Never)
+            if on_empty is _UNSET:
+                return TypeInfo.from_type(typing.Never)
+            return on_empty
 
         def expand_unions(t: "TypeInfo") -> Iterator["TypeInfo"]:
             # Don't merge unions designated as typevars, or the typevar gets lost.
@@ -198,15 +245,25 @@ class TypeInfo:
 
     @staticmethod
     def _strip_type_obj_for_pickle(t: "TypeInfo") -> tuple[Any, ...]:
-        """Pickle reducer that drops `type_obj`.  Registered on the
-        `Pickler.dispatch_table` used to write `.rt` files: without it,
-        the live class reference (often a __main__-defined class) leaks
-        through the round-trip and overrides the canonical (module, name)
-        chosen by `AdjustTypeNamesT`, producing names like
-        `__main__.Foo` at process time.  Walks `fields()` so it stays
-        correct as TypeInfo evolves."""
+        """Pickle reducer that drops ``type_obj`` and ``container_id``.
+        Registered on the ``Pickler.dispatch_table`` used to write
+        ``.rt`` files.
+
+        ``type_obj``: without stripping, the live class reference (often
+        a ``__main__``-defined class) leaks through the round-trip and
+        overrides the canonical ``(module, name)`` chosen by
+        ``AdjustTypeNamesT``, producing names like ``__main__.Foo`` at
+        process time.
+
+        ``container_id``: a transient cid (from
+        ``ContainerSamples.cid``) only meaningful within one recording
+        process — the resolver consumes it before pickle; any leftover
+        values reference an in-memory cache that the process step won't
+        have.  Cleared here for cleanliness.
+
+        Walks ``fields()`` so it stays correct as TypeInfo evolves."""
         return type(t), tuple(
-            None if f.name == 'type_obj' else getattr(t, f.name)
+            None if f.name in ('type_obj', 'container_id') else getattr(t, f.name)
             for f in fields(type(t))
         )
 
