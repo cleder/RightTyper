@@ -29,3 +29,29 @@ def test_issue_22(tmp_path, monkeypatch):
     subprocess.run([sys.executable, '-m', 'righttyper', 'run', 't.py'])
 
     assert "def extracted_function(A: list[int]) -> bool" in Path("t.py").read_text()
+
+
+def test_issue_193(tmp_path, monkeypatch):
+    # unittest.mock's _Call answers any attribute access with a child _Call,
+    # so probing for __code__ used to yield an unhashable object that crashed
+    # the (process-global) call handler.
+    t = textwrap.dedent("""\
+        from unittest.mock import call
+
+        def build():
+            return [call(a=1), call(a=2)]
+
+        build()
+        """)
+
+    monkeypatch.chdir(tmp_path)
+    Path("t.py").write_text(t)
+
+    p = subprocess.run(
+        [sys.executable, '-m', 'righttyper', 'run', '--only-collect', 't.py'],
+        capture_output=True, text=True
+    )
+
+    assert p.returncode == 0, p.stderr
+    assert "unhashable" not in p.stderr
+    assert "TypeError" not in p.stderr
