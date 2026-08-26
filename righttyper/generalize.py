@@ -6,7 +6,7 @@ from functools import cache
 from types import EllipsisType
 import sys
 from righttyper.typeinfo import TypeInfo, ListTypeInfo, CallTrace, NoneTypeInfo
-from righttyper.type_id import get_type_name
+from righttyper.type_id import get_type_name, _safe_getattr
 from righttyper.options import output_options
 
 
@@ -358,11 +358,11 @@ def lub(
             # only merge to a supertype that has all the shared attributes.
             common_attrs = (
                 {attr for attr in dir(a.type_obj)
-                 if getattr(a.type_obj, attr, None) is not None
+                 if _safe_getattr(a.type_obj, attr) is not None
                  if not attr.startswith("_") or attr.startswith("__")}
                 &
                 {attr for attr in dir(b.type_obj)
-                 if getattr(b.type_obj, attr, None) is not None
+                 if _safe_getattr(b.type_obj, attr) is not None
                  if not attr.startswith("_") or attr.startswith("__")}
             )
         a_mro = set(a.type_obj.__mro__)

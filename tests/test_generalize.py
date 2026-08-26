@@ -1126,6 +1126,37 @@ def test_lub_mro_common_base_without_attrs():
     assert result.type_obj is Base
 
 
+# A class whose attribute access raises rather than returning a value. Probing
+# it with a bare getattr() runs the descriptor and propagates the error; this is
+# the shape of issue #188, where zope.interface's machinery raised a TypeError
+# from a class RightTyper merely inspected.
+
+class _RaisingDescriptor:
+    def __get__(self, obj: object, objtype: type|None = None) -> object:
+        raise TypeError("unsupported operand type(s) for +: 'property' and 'str'")
+
+
+class RaisingChildA(Base):
+    boom = _RaisingDescriptor()
+
+
+class RaisingChildB(Base):
+    pass
+
+
+def test_lub_mro_tolerates_raising_attribute():
+    """A type whose attribute access raises must not take lub() down."""
+    from righttyper.generalize import lub
+
+    # Guard the premise: a bare getattr() on this class really does raise.
+    with pytest.raises(TypeError):
+        getattr(RaisingChildA, "boom", None)
+
+    result = lub(TypeInfo.from_type(RaisingChildA), TypeInfo.from_type(RaisingChildB))
+    assert not result.is_union()
+    assert result.type_obj is Base
+
+
 def test_lub_mro_no_useful_base():
     """lub(int, str) stays as union (only 'object' in common)."""
     from righttyper.generalize import lub
