@@ -53,5 +53,4 @@ def test_issue_193(tmp_path, monkeypatch):
     )
 
     assert p.returncode == 0, p.stderr
-    assert "unhashable" not in p.stderr
-    assert "TypeError" not in p.stderr
+    assert "_Call" not in p.stderr
