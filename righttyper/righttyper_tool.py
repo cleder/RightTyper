@@ -26,8 +26,19 @@ USE_LOCAL_EVENTS = True
 events = sys.monitoring.events
 
 
+def _code_of(obj: object) -> CodeType | None:
+    """Return obj's __code__, but only if it is a real code object.
+
+    Some objects synthesize arbitrary attributes from __getattr__ rather than
+    raising: unittest.mock's _Call returns a child _Call for any name, and _Call
+    is unhashable, so it must not reach our code-keyed dicts and sets.
+    """
+    code = getattr(obj, "__code__", None)
+    return code if isinstance(code, CodeType) else None
+
+
 def _call_handler(code: CodeType, offset: int, callable: Callable, arg0: object) -> Any:
-    callee_code = getattr(callable, "__code__", None)
+    callee_code = _code_of(callable)
 
     # Check __dict__ directly to avoid triggering __getattr__ (e.g., on MagicMock)
     wrapped = (
@@ -39,11 +50,12 @@ def _call_handler(code: CodeType, offset: int, callable: Callable, arg0: object)
     # Record wrapper->wrapped relationship for type propagation
     if (
         has_code(wrapped)
-        and (wrapped_code := wrapped.__code__) in setup_code
+        and isinstance(wrapped_code := wrapped.__code__, CodeType)
+        and wrapped_code in setup_code
     ):
         # For class instances, the executing code is __call__'s code
-        wrapper_code = callee_code or getattr(
-            getattr(type(callable), "__call__", None), "__code__", None
+        wrapper_code = callee_code or _code_of(
+            getattr(type(callable), "__call__", None)
         )
         if wrapper_code and wrapper_code is not wrapped_code:
             wrapped_by[wrapper_code] = wrapped
@@ -54,7 +66,7 @@ def _call_handler(code: CodeType, offset: int, callable: Callable, arg0: object)
         callee_code in setup_code
         or (
             wrapped is not None
-            and (callee_code := getattr(callable := wrapped, "__code__", None)) in setup_code
+            and (callee_code := _code_of(callable := wrapped)) in setup_code
         )
     ):
         call_mapping[(code, offset)] = callable
