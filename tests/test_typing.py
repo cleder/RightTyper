@@ -212,6 +212,33 @@ def test_to_name_map_skips_non_string_module():
     assert not any('CythonLike' in k[1] for k in name_map)
 
 
+def test_typemap_skips_unhashable_type():
+    """TypeMap keys its work map by type, so an unhashable class must be skipped.
+
+    TypeMap walks every class reachable from the namespaces it is given, so a single
+    unhashable class anywhere in sys.modules would otherwise abort the whole scan.
+    Regression test for issue #197.
+    """
+    class Meta(type):
+        def __eq__(cls, other: object) -> bool:
+            return NotImplemented       # type: ignore[return-value]
+        __hash__ = None                 # type: ignore[assignment]
+
+    class Unhashable(metaclass=Meta):
+        pass
+
+    class Nameable:
+        pass
+
+    # Premise: this really is unhashable, and would blow up as a dict key.
+    with pytest.raises(TypeError):
+        hash(Unhashable)
+
+    # Must not raise, and must still pick up the hashable sibling in the namespace.
+    tm = TypeMap({'Unhashable': Unhashable, 'Nameable': Nameable})
+    assert Nameable in tm._map
+
+
 def test_items_from_typing():
     assert TypeInfo("typing", "Any") == get_type_name(Any)
     assert TypeInfo("typing", "Self") == get_type_name(Self)
