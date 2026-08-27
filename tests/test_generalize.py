@@ -1254,6 +1254,20 @@ def test_lub_typeddict_parametrized_operands():
     assert lub(a, b).is_union()
 
 
+def test_merged_types_singleton_unhashable(unhashable_types):
+    """merged_types() on a single unhashable type must not crash.
+
+    _merge_set's singleton path calls _is_private_type (which is @cache'd, so it
+    hashes its argument) before any pairwise lub(), so lub()'s own guard does not
+    cover this route. Regression test for issue #197.
+    """
+    from righttyper.generalize import merged_types
+
+    A, _ = unhashable_types
+    ti = TypeInfo.from_type(A)
+    assert merged_types({ti}) == ti
+
+
 
 
 def test_lub_mro_no_useful_base():
