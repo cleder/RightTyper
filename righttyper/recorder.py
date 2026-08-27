@@ -120,12 +120,20 @@ class PendingCallTrace:
     ) -> None:
         self.arg_info = arg_info
         # PY_START's arg_info.locals always contains every arg name (Python
-        # binds parameters before the body runs), so no element here is
-        # ever None — the per-entry None case in _get_arg_types only
-        # applies to later samples where a name may have been del'd.
-        self.args_start = typing.cast(
-            "tuple[TypeInfo, ...]",
-            self._get_arg_types(arg_info, arg_info.locals),
+        # binds parameters before the body runs), so no element is None on that
+        # path — the per-entry None case in _get_arg_types only applies to later
+        # samples where a name may have been del'd.
+        #
+        # A *synthetic* ArgInfo is a different matter: the one built for
+        # wrapped-function propagation can leave a parameter unbound, because
+        # bind_partial permits missing arguments and apply_defaults only fills
+        # those that have defaults. Fill any such gap with UnknownTypeInfo, which
+        # is what we in fact know about it, rather than casting the None away and
+        # letting it reach CallTrace — there it crashed whichever type
+        # transformer ran first in finish_recording. See #199.
+        self.args_start: tuple[TypeInfo, ...] = tuple(
+            t if t is not None else UnknownTypeInfo
+            for t in self._get_arg_types(arg_info, arg_info.locals)
         )
         self.yields: set[TypeInfo] = set()
         self.sends: set[TypeInfo] = set()
