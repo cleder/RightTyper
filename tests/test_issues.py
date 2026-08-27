@@ -29,3 +29,48 @@ def test_issue_22(tmp_path, monkeypatch):
     subprocess.run([sys.executable, '-m', 'righttyper', 'run', 't.py'])
 
     assert "def extracted_function(A: list[int]) -> bool" in Path("t.py").read_text()
+
+
+def test_issue_199(tmp_path, monkeypatch):
+    """A wrapper that supplies an argument its caller never passed must not
+    put a None inside a CallTrace.
+
+    _get_arg_types returns None for a parameter absent from the locals mapping.
+    That never happens for a real PY_START frame, but the synthetic ArgInfo built
+    for wrapped-function propagation uses bind_partial, which leaves unpassed
+    parameters unbound. The None used to survive into the CallTrace and crash
+    whichever type transformer ran first in finish_recording -- after the traced
+    run had already finished, so righttyper exited 0 having written nothing.
+    """
+    t = textwrap.dedent("""\
+        import functools
+
+        def deco(f):
+            @functools.wraps(f)
+            def wrapper(a):
+                return f(a, 99)     # `b` comes from here, not from the caller
+            return wrapper
+
+        @deco
+        def target(a, b):
+            return a + b
+
+        print(target(1))
+        """)
+
+    monkeypatch.chdir(tmp_path)
+    Path("t.py").write_text(t)
+
+    p = subprocess.run(
+        [sys.executable, '-m', 'righttyper', 'run', '--only-collect', 't.py'],
+        capture_output=True, text=True,
+    )
+
+    # The failure was silent: exit 0, nothing on the console, no .rt file, and
+    # the traceback only in righttyper.log. Assert on the artifact, not the code.
+    assert list(Path().glob("*.rt")), (
+        "no .rt written; righttyper.log says:\n"
+        + (Path("righttyper.log").read_text() if Path("righttyper.log").exists() else "(no log)")
+    )
+    log = Path("righttyper.log")
+    assert not log.exists() or "exception after target execution" not in log.read_text()
