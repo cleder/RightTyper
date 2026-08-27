@@ -8,7 +8,7 @@ import logging
 from pathlib import Path
 from righttyper.typeinfo import TypeInfo, UnknownTypeInfo
 from righttyper.logger import logger
-from righttyper.righttyper_utils import source_to_module_fqn, is_test_module
+from righttyper.righttyper_utils import source_to_module_fqn, is_test_module, is_hashable
 
 
 # TODO use TypeAliasType-valued names when possible (the type is in its __value__)
@@ -162,7 +162,10 @@ class TypeMap:
 
                 new_name_parts = name_parts + [name]
 
-                if not isinstance(obj, types.ModuleType):
+                # An unhashable class (metaclass defining __eq__ without __hash__)
+                # can't be a work_map key.  Skip naming it, but still recurse into
+                # it below -- the types it contains may well be nameable.
+                if not isinstance(obj, types.ModuleType) and is_hashable(obj):
                     work_map[typing.cast(type, obj)].append(
                         self.TypeName(
                             mod_parts,
