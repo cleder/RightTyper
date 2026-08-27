@@ -10,6 +10,21 @@ from righttyper.type_id import get_type_name, _safe_getattr
 from righttyper.options import output_options
 
 
+@cache
+def _probed_attrs(type_obj: type) -> frozenset[str]:
+    """The attributes of ``type_obj`` that lub()'s Rule 7 safety filter considers.
+
+    ``_safe_getattr`` uses ``inspect.getattr_static``, which costs ~17x a plain
+    ``getattr``; lub() re-probes the same handful of types thousands of times in a
+    single run, so memoize the probe per type.
+    """
+    return frozenset(
+        attr for attr in dir(type_obj)
+        if _safe_getattr(type_obj, attr) is not None
+        if not attr.startswith("_") or attr.startswith("__")
+    )
+
+
 # Types that are covariant (immutable), so merging their type arguments
 # is safe even for function parameters and return types.
 _COVARIANT_TYPES = (tuple, frozenset)
@@ -356,15 +371,7 @@ def lub(
         else:
             # Without accessed_attributes, use dir() intersection as safety filter:
             # only merge to a supertype that has all the shared attributes.
-            common_attrs = (
-                {attr for attr in dir(a.type_obj)
-                 if _safe_getattr(a.type_obj, attr) is not None
-                 if not attr.startswith("_") or attr.startswith("__")}
-                &
-                {attr for attr in dir(b.type_obj)
-                 if _safe_getattr(b.type_obj, attr) is not None
-                 if not attr.startswith("_") or attr.startswith("__")}
-            )
+            common_attrs = _probed_attrs(a.type_obj) & _probed_attrs(b.type_obj)
         a_mro = set(a.type_obj.__mro__)
         for base in b.type_obj.__mro__:
             if base in a_mro and base is not object:
