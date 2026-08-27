@@ -8,6 +8,7 @@ import sys
 from righttyper.typeinfo import TypeInfo, ListTypeInfo, CallTrace, NoneTypeInfo
 from righttyper.type_id import get_type_name, _safe_getattr
 from righttyper.options import output_options
+from righttyper.righttyper_utils import is_hashable
 
 
 @cache
@@ -229,6 +230,13 @@ def lub(
     # Without a real type (could be None or a typing special form),
     # no merging rules apply.
     if not isinstance(a.type_obj, type) or not isinstance(b.type_obj, type):
+        return TypeInfo.from_set_new({a, b})
+
+    # Every merging rule below hashes both type objects, so an unhashable class
+    # (metaclass defining __eq__ without __hash__) has to bail out here.  Safe to
+    # build the union: TypeInfo excludes type_obj from comparison, so hashing a
+    # TypeInfo never touches it.
+    if not is_hashable(a.type_obj) or not is_hashable(b.type_obj):
         return TypeInfo.from_set_new({a, b})
 
     # Rule 4: Subtype check (MRO + numeric tower)
