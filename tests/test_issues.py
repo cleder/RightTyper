@@ -99,3 +99,50 @@ def test_issue_199(tmp_path, monkeypatch):
     )
     log = Path("righttyper.log")
     assert not log.exists() or "exception after target execution" not in log.read_text()
+
+
+def test_issue_200(tmp_path, monkeypatch):
+    """A TypedDict annotation on an overridden method must not kill `process`.
+
+    A TypedDict subclass satisfies isinstance(x, type) but raises on issubclass
+    by design. It reaches lub() because _propagate_to_parents merges the child's
+    observed argument type with the parent's *declared* one, so the TypedDict
+    arrives as a type_obj even though no runtime value ever has that type.
+
+    The crash is intermittent by nature: Rule 4 is gated on both operands being
+    argless, so calling the override with a dict yields dict[str, int]|Payload
+    and survives. Passing a str keeps the observed type argless, which is what
+    makes it reach issubclass.
+    """
+    t = textwrap.dedent("""\
+        from typing import TypedDict
+
+        class Payload(TypedDict):
+            a: int
+
+        class Base:
+            def handle(self, p: Payload) -> None: ...
+
+        class Child(Base):
+            def handle(self, p):
+                return len(p)
+
+        Child().handle("xy")
+        """)
+
+    monkeypatch.chdir(tmp_path)
+    Path("t.py").write_text(t)
+
+    subprocess.run([sys.executable, '-m', 'righttyper', 'run', '--root', '.', 't.py'])
+
+    # Silent failure: exit 0 with no output. Assert on the artifact.
+    log = Path("righttyper.log")
+    assert not log.exists() or "TypedDict does not support" not in log.read_text()
+    # Union member order differs between the rewrite and the diff paths, so
+    # assert on the members rather than on a rendered ordering.
+    annotated = Path("t.py").read_text()
+    child_sig = next(
+        line for line in annotated.splitlines()
+        if line.strip().startswith("def handle") and "-> int" in line
+    )
+    assert "Payload" in child_sig and "str" in child_sig, child_sig
