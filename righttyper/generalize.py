@@ -155,6 +155,12 @@ def _safe_issubclass(a: type, b: type) -> bool:
     TypedDict arrives as a type_obj even though no runtime value ever has that
     type.  False is the right answer to a subtype query that cannot be evaluated.
     See #200.
+
+    Note the asymmetry: ``__subclasscheck__`` lives on the *second* argument, so
+    only ``issubclass(x, TypedDict_subclass)`` raises -- ``issubclass(Payload,
+    Collection)`` is fine.  That is why the many ``issubclass(some.type_obj,
+    <fixed ABC>)`` calls in this module need no guard, while every call whose
+    second argument comes from an operand does.
     """
     try:
         return issubclass(a, b)
@@ -323,7 +329,7 @@ def lub(
             # explicitly inherited, e.g. Generator → Iterator → Iterable)
             common: type | None = None
             for cls in ne_obj.__mro__:
-                if issubclass(e_obj, cls) and cls is not object:
+                if _safe_issubclass(e_obj, cls) and cls is not object:
                     common = cls
                     break
             else:
@@ -354,9 +360,9 @@ def lub(
     ):
         a_obj, b_obj = cast(type, a.type_obj), cast(type, b.type_obj)
         common = None
-        if issubclass(a_obj, b_obj):
+        if _safe_issubclass(a_obj, b_obj):
             common = b_obj
-        elif issubclass(b_obj, a_obj):
+        elif _safe_issubclass(b_obj, a_obj):
             common = a_obj
         if (
             common is not None
