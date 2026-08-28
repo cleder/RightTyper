@@ -61,13 +61,14 @@ def test_issue_199(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     Path("t.py").write_text(t)
 
-    p = subprocess.run(
+    subprocess.run(
         [sys.executable, '-m', 'righttyper', 'run', '--only-collect', 't.py'],
         capture_output=True, text=True,
     )
 
     # The failure was silent: exit 0, nothing on the console, no .rt file, and
-    # the traceback only in righttyper.log. Assert on the artifact, not the code.
+    # the traceback only in righttyper.log. Assert on the artifact, not the code,
+    # which is why the CompletedProcess is deliberately not inspected.
     assert list(Path().glob("*.rt")), (
         "no .rt written; righttyper.log says:\n"
         + (Path("righttyper.log").read_text() if Path("righttyper.log").exists() else "(no log)")
