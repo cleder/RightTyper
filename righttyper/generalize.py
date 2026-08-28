@@ -160,11 +160,29 @@ def _is_private_type(cls: type) -> bool:
 _NUMERIC_TOWER = {int: float, float: complex}
 
 
+def _safe_issubclass(a: type, b: type) -> bool:
+    """``issubclass`` that answers False instead of raising.
+
+    ``isinstance(x, type)`` does not imply x supports class checks.  A TypedDict
+    subclass refuses them by design (``TypedDict does not support instance and
+    class checks``), and so does a Protocol with non-method members.  Such a
+    class can reach lub() as a declared annotation -- ``_propagate_to_parents``
+    merges a child's observed argument type with the parent's declared one, so a
+    TypedDict arrives as a type_obj even though no runtime value ever has that
+    type.  False is the right answer to a subtype query that cannot be evaluated.
+    See #200.
+    """
+    try:
+        return issubclass(a, b)
+    except TypeError:
+        return False
+
+
 def _is_subtype(a: type, b: type) -> bool:
     """Check if a is a subtype of b, including the numeric tower."""
     if a is b:
         return True
-    if issubclass(a, b):
+    if _safe_issubclass(a, b):
         return True
     # Numeric tower: int <: float <: complex. Walk a's MRO for the nearest
     # tower entry, then promote up the tower checking against b.
@@ -173,7 +191,7 @@ def _is_subtype(a: type, b: type) -> bool:
             t = ancestor
             while t in _NUMERIC_TOWER:
                 t = _NUMERIC_TOWER[t]
-                if issubclass(t, b):
+                if _safe_issubclass(t, b):
                     return True
             break
     return False
