@@ -9,7 +9,7 @@ from pathlib import Path
 import logging
 from righttyper.logger import logger
 from righttyper.righttyper_types import ArgumentName, VariableName, Filename, CodeId, CallableWithCode, cast_not_None
-from righttyper.typeinfo import TypeInfo, NoneTypeInfo, UnknownTypeInfo, CallTrace, UnionTypeInfo
+from righttyper.typeinfo import TypeInfo, NoneTypeInfo, UnknownTypeInfo, NeverTypeInfo, CallTrace, UnionTypeInfo
 from typing import Final, Any, NewType, overload
 import typing
 from righttyper.observations import Observations, FuncInfo, OverriddenFunction, ArgInfo
@@ -127,12 +127,17 @@ class PendingCallTrace:
         # A *synthetic* ArgInfo is a different matter: the one built for
         # wrapped-function propagation can leave a parameter unbound, because
         # bind_partial permits missing arguments and apply_defaults only fills
-        # those that have defaults. Fill any such gap with UnknownTypeInfo, which
-        # is what we in fact know about it, rather than casting the None away and
-        # letting it reach CallTrace — there it crashed whichever type
-        # transformer ran first in finish_recording. See #199.
+        # those that have defaults. Fill any such gap rather than casting the
+        # None away and letting it reach CallTrace — there it crashed whichever
+        # type transformer ran first in finish_recording. See #199.
+        #
+        # Fill with Never, the union identity: from_set() drops it as soon as any
+        # real observation of the same parameter exists, which is exactly what
+        # "this trace saw nothing here" should mean. UnknownTypeInfo is Any, and
+        # Any *subsumes* a union instead of vanishing from it, so it discarded
+        # every genuine observation the parameter had elsewhere.
         self.args_start: tuple[TypeInfo, ...] = tuple(
-            t if t is not None else UnknownTypeInfo
+            t if t is not None else NeverTypeInfo
             for t in self._get_arg_types(arg_info, arg_info.locals)
         )
         self.yields: set[TypeInfo] = set()
