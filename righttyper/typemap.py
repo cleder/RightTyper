@@ -35,6 +35,11 @@ class TypeMap:
 
     def find(self, t: type) -> list[tuple[str, str]]:
         """Given a type object, return all its module and qualified name as strings."""
+        # Guarding the build alone isn't enough: dict.get() hashes its key, so an
+        # unhashable class reaching lookup raises just as it would have during the
+        # scan.  It was never entered, so "no names" is the honest answer.
+        if not is_hashable(t):
+            return []
         return self._map.get(t, [])
 
 
