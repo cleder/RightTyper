@@ -261,3 +261,80 @@ def test_issue_197_unhashable_class_on_recording_path(tmp_path, monkeypatch):
     # enter -- but the rest of the signature must still be inferred.
     annotated = Path("t.py").read_text()
     assert "def f(x) -> int:" in annotated, annotated
+
+
+def test_issue_199_synthetic_arg_does_not_erase_observations(tmp_path, monkeypatch):
+    """The filler for an unbound synthetic parameter must not outrank real data.
+
+    The synthetic ArgInfo leaves `b` unbound, so PendingCallTrace fills that slot.
+    Filling it with UnknownTypeInfo -- i.e. Any -- made that trace *subsume* every
+    genuine observation of `b`, because Any absorbs a union rather than vanishing
+    from it, and the parameter came out unannotated despite being observed as int
+    on every call. Never is the union identity, so it drops out instead.
+    """
+    t = textwrap.dedent("""\
+        import functools
+
+        def deco(f):
+            @functools.wraps(f)
+            def wrapper(a):
+                return f(a, 99)
+            return wrapper
+
+        def target(a, b):
+            return a + b
+
+        print(deco(target)(1))
+        print(target(2, 3))
+        print(target(4, 5))
+        """)
+
+    monkeypatch.chdir(tmp_path)
+    Path("t.py").write_text(t)
+
+    subprocess.run([sys.executable, '-m', 'righttyper', 'run', '--root', '.', 't.py'])
+
+    annotated = Path("t.py").read_text()
+    sig = next(
+        line for line in annotated.splitlines()
+        if line.strip().startswith("def target")
+    )
+    assert sig.strip() == "def target(a: int, b: int) -> int:", (
+        f"{sig!r}\n--- full file ---\n{annotated}"
+    )
+
+
+def test_issue_200_self_compatibility_check(tmp_path, monkeypatch):
+    """The Self-compatibility check in _clone_for_context needs the same guard.
+
+    Routing _is_subtype through safe_issubclass covered generalize, but
+    _CloneForContextT.__init__ has its own `issubclass(source, dest)` whose second
+    operand is caller-derived too -- and it sits in _propagate_to_parents, the very
+    path by which such classes arrive. A non-runtime_checkable Protocol with data
+    members raises there, and the run failed the same silent way: exit 0, nothing
+    rewritten.
+    """
+    t = textwrap.dedent("""\
+        from typing import Protocol
+
+        class Base(Protocol):
+            x: int
+            def handle(self, p): ...
+
+        class Child(Base):
+            x = 1
+            def handle(self, p):
+                return len(p)
+
+        Child().handle("xy")
+        """)
+
+    monkeypatch.chdir(tmp_path)
+    Path("t.py").write_text(t)
+
+    subprocess.run([sys.executable, '-m', 'righttyper', 'run', '--root', '.', 't.py'])
+
+    log = Path("righttyper.log")
+    assert not log.exists() or "runtime_checkable" not in log.read_text()
+    annotated = Path("t.py").read_text()
+    assert "-> int" in annotated, annotated
