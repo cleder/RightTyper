@@ -81,7 +81,7 @@ def _call_handler(code: CodeType, offset: int, callable: Callable, arg0: object)
             target = getattr(callable, '__new__', None)
         else:
             target = getattr(callable, '__init__', None)
-        target_code = getattr(target, '__code__', None)
+        target_code = _code_of(target)
         mod = sys.modules.get(callable.__module__)
         source_file = getattr(mod, '__file__', None)
         if target_code and source_file and not skip_this_file(source_file):
