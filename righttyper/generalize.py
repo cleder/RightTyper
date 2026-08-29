@@ -177,7 +177,7 @@ _NUMERIC_TOWER = {int: float, float: complex}
 
 
 def _safe_issubclass(a: type, b: type) -> bool:
-    """``issubclass`` that answers False instead of raising.
+    """``issubclass`` that answers False instead of raising ``TypeError``.
 
     ``isinstance(x, type)`` does not imply x supports class checks.  A TypedDict
     subclass refuses them by design (``TypedDict does not support instance and
@@ -193,6 +193,12 @@ def _safe_issubclass(a: type, b: type) -> bool:
     Collection)`` is fine.  That is why the many ``issubclass(some.type_obj,
     <fixed ABC>)`` calls in this module need no guard, while every call whose
     second argument comes from an operand does.
+
+    Only ``TypeError`` is caught, and deliberately so: that is how "this class
+    does not support class checks" is spelled, both by ``TypedDict``/``Protocol``
+    and by ``type.__subclasscheck__`` itself.  A ``__subclasscheck__`` that raises
+    anything else is a bug in that class; swallowing it into a False would skew
+    the inferred type silently instead of surfacing the fault.
     """
     try:
         return issubclass(a, b)
