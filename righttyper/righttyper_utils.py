@@ -11,6 +11,38 @@ from righttyper.logger import logger
 from righttyper.options import run_options
 
 
+def safe_issubclass(a: type, b: type) -> bool:
+    """``issubclass`` that answers False instead of raising ``TypeError``.
+
+    ``isinstance(x, type)`` does not imply x supports class checks.  A TypedDict
+    subclass refuses them by design (``TypedDict does not support instance and
+    class checks``), and so does a Protocol with non-method members.  Such a
+    class reaches generalize and observations as a *declared* annotation --
+    ``_propagate_to_parents`` merges a child's observed argument type with the
+    parent's declared one, so a TypedDict arrives as a type_obj even though no
+    runtime value ever has that type.  False is the right answer to a subtype
+    query that cannot be evaluated.  See #200.
+
+    Note the asymmetry: ``__subclasscheck__`` lives on the *second* argument, so
+    only ``issubclass(x, TypedDict_subclass)`` raises -- ``issubclass(Payload,
+    Collection)`` is fine.  That is why the many ``issubclass(some.type_obj,
+    <fixed ABC>)`` calls across the codebase need no guard, while every call
+    whose second argument is caller-derived does -- generalize's Rules 4, 6 and
+    6.5, and observations' Self-compatibility and strict-subtype checks.  Those
+    are the sites; a new one belongs here too.
+
+    Only ``TypeError`` is caught, and deliberately so: that is how "this class
+    does not support class checks" is spelled, both by ``TypedDict``/``Protocol``
+    and by ``type.__subclasscheck__`` itself.  A ``__subclasscheck__`` that raises
+    anything else is a bug in that class; swallowing it into a False would skew
+    the inferred type silently instead of surfacing the fault.
+    """
+    try:
+        return issubclass(a, b)
+    except TypeError:
+        return False
+
+
 def unwrap(method: abc.Callable|None) -> abc.Callable|None:
     """Follows a chain of `__wrapped__` attributes to find the original function."""
 
