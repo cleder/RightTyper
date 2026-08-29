@@ -38,9 +38,14 @@ class TypeMap:
         # Guarding the build alone isn't enough: dict.get() hashes its key, so an
         # unhashable class reaching lookup raises just as it would have during the
         # scan.  It was never entered, so "no names" is the honest answer.
-        if not is_hashable(t):
+        #
+        # try/except rather than is_hashable(): this runs once per type node in
+        # every annotation, and the probe would hash a second time on every one
+        # of the overwhelmingly common hashable lookups.
+        try:
+            return self._map.get(t, [])
+        except TypeError:
             return []
-        return self._map.get(t, [])
 
 
     def _build_map(self, main_globals: dict[str, typing.Any]|None) -> dict[type, list[tuple[str, str]]]:

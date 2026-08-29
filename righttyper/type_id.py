@@ -226,6 +226,25 @@ T = typing.TypeVar("T")
 # are available from the "builtins" module, some from the "types" module, but others
 # still, such as "list_iterator", aren't known by any particular name.
 #
+_V = typing.TypeVar("_V")
+
+
+def _lookup_type(table: dict[type, _V], t: type) -> _V | None:
+    """``table.get(t)`` for a type key, tolerating an unhashable class.
+
+    A class is unhashable when its metaclass defines ``__eq__`` without
+    ``__hash__``, or a ``__hash__`` that raises.  These tables are keyed by
+    builtins, so such a class can never be a key in one -- a miss is the correct
+    answer rather than a crash, and this runs on the recording path, well before
+    lub() or TypeMap get a chance to guard it.  try/except keeps the common
+    hashable case free of any extra probe.  See #197.
+    """
+    try:
+        return table.get(t)
+    except TypeError:
+        return None
+
+
 _BUILTINS: typing.Final[dict[type, TypeInfo]] = {
     # first get what we can from 'builtins'...
     t: TypeInfo('', n, type_obj=t)  # note we use '' as the module name
@@ -303,7 +322,7 @@ def get_type_name(t: type, depth: int = 0) -> TypeInfo:
         logger.error(f"RightTyper failed to compute the type of {t}.")
         return UnknownTypeInfo
 
-    if (ti := _BUILTINS.get(t)):
+    if (ti := _lookup_type(_BUILTINS, t)):
         return ti
 
     if t.__module__ == "builtins":
@@ -728,7 +747,7 @@ def _handle_dict(value: Any, depth: int) -> TypeInfo:
     sampler = lambda: ((el := _random_item(value)), value[el])
     args = _sample_container(value, 2, sampler, depth)
     t: type = type(value)
-    if (ti := _BUILTINS.get(t)):
+    if (ti := _lookup_type(_BUILTINS, t)):
         return ti.replace(args=args, container_id=_cid_for(value))
     return TypeInfo.from_type(t, args=args, container_id=_cid_for(value))
 
@@ -949,11 +968,11 @@ def get_value_type(
     t: type = type(value)
     args: tuple[TypeInfo|str|ellipsis, ...]
 
-    if (h := _type2handler.get(t)):
+    if (h := _lookup_type(_type2handler, t)):
         if (ti := h(value, depth)) is not None:
             return ti
 
-    if ti := _BUILTINS.get(t):
+    if ti := _lookup_type(_BUILTINS, t):
         return ti
 
     # Is this a spec-based mock?
