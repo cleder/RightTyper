@@ -50,8 +50,7 @@ def _call_handler(code: CodeType, offset: int, callable: Callable, arg0: object)
     # Record wrapper->wrapped relationship for type propagation
     if (
         has_code(wrapped)
-        and isinstance(wrapped_code := wrapped.__code__, CodeType)
-        and wrapped_code in setup_code
+        and (wrapped_code := wrapped.__code__) in setup_code
     ):
         # For class instances, the executing code is __call__'s code
         wrapper_code = callee_code or _code_of(
