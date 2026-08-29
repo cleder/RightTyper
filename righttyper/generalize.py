@@ -2,7 +2,7 @@ from typing import cast, Sequence, Iterator, Any, Never, NoReturn
 from abc import ABCMeta
 import collections.abc as abc
 from collections import Counter
-from functools import cache
+from functools import cache, lru_cache
 from types import EllipsisType
 import sys
 from righttyper.typeinfo import TypeInfo, ListTypeInfo, CallTrace, NoneTypeInfo
@@ -10,13 +10,26 @@ from righttyper.type_id import get_type_name, _safe_getattr
 from righttyper.options import output_options
 
 
-@cache
+# Bounded, not @cache: the key is a type object and the entry holds it alive, so
+# an unbounded table pins every class ever probed -- including the ones a long
+# pytest run manufactures per test (make_dataclass, namedtuple, mock autospec)
+# -- for the lifetime of the process.  A cap keeps the ~17x saving on the small
+# working set that lub() actually revisits, without the retention.
+@lru_cache(maxsize=2048)
 def _probed_attrs(type_obj: type) -> frozenset[str]:
     """The attributes of ``type_obj`` that lub()'s Rule 7 safety filter considers.
 
     ``_safe_getattr`` uses ``inspect.getattr_static``, which costs ~17x a plain
     ``getattr``; lub() re-probes the same handful of types thousands of times in a
     single run, so memoize the probe per type.
+
+    Note this is not only a memoization of the previous ``getattr`` probe: a
+    static lookup answers for attributes a dynamic one cannot resolve (``type``
+    gains ``__abstractmethods__``, ``__annotate__``, ``__annotations__`` and
+    ``__text_signature__``), and drops any that only a metaclass ``__getattr__``
+    would have supplied.  The first direction only widens ``common_attrs``, so
+    Rule 7 merges strictly less; the second can narrow it.  Not executing
+    third-party descriptor code is the point, and is worth that.
     """
     return frozenset(
         attr for attr in dir(type_obj)
@@ -452,15 +465,21 @@ def _merge_set(
             )
             if public_base is not None:
                 # De-privatize if the public ancestor has all accessed attributes.
-                sentinel = object()
-                check_attrs = accessed_attributes or frozenset(
-                    attr for attr in dir(t.type_obj)
-                    if getattr(t.type_obj, attr, None) is not None
-                    if not attr.startswith("_") or attr.startswith("__")
-                )
+                #
+                # Probe statically here too: this is the same dir()-intersection
+                # filter as Rule 7, on the same arbitrary third-party types, and a
+                # plain getattr runs their descriptors.  #188 crashed here exactly
+                # as it did there -- the singleton path reaches this without ever
+                # calling lub(), so guarding Rule 7 alone left it exposed.
+                #
+                # _safe_getattr answers None for an attribute it cannot resolve,
+                # so None means "not usable from this class"; that is already how
+                # _probed_attrs filters, and treating it as absent here can only
+                # decline a de-privatization, never invent one.
+                check_attrs = accessed_attributes or _probed_attrs(t.type_obj)
                 if all(
-                    (a := getattr(public_base, attr, sentinel)) is not sentinel
-                    and a is getattr(t.type_obj, attr, sentinel)
+                    (a := _safe_getattr(public_base, attr)) is not None
+                    and a is _safe_getattr(t.type_obj, attr)
                     for attr in check_attrs
                 ):
                     return get_type_name(public_base)
