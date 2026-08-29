@@ -238,6 +238,12 @@ def test_typemap_skips_unhashable_type():
     tm = TypeMap({'Unhashable': Unhashable, 'Nameable': Nameable})
     assert Nameable in tm._map
 
+    # Looking one up must not raise either: find() hashes its argument just as the
+    # scan did, and observations carrying such a class do reach it (via
+    # AdjustTypeNamesT/CheckTypeNamesT and recorder's enclosing-class lookup).
+    assert tm.find(Unhashable) == []
+    assert tm.find(Nameable) != []
+
 
 def test_items_from_typing():
     assert TypeInfo("typing", "Any") == get_type_name(Any)
