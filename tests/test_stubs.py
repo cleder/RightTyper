@@ -210,3 +210,27 @@ def test_stubs_annassign_with_value():
         COUNT: int
         def f(x: int) -> int: ...
         """)
+
+
+def test_stubs_annotated_all_variable_keeps_value():
+    # An annotated __all__ must survive whole, like the bare form above: stripping
+    # the value leaves a stub that declares an export list with no members, which
+    # is a silent version of the crash the AnnAssign branch was added to avoid.
+    code = textwrap.dedent("""\
+        __all__: list[str] = [
+            "foo",
+            "Bar"
+        ]
+
+        COUNT: int = 5
+
+        def foo() -> int:
+            return 42
+
+        class Bar(object):
+            pass
+        """
+    )
+    output = generate_stub(code)
+    assert '"foo"' in output and '"Bar"' in output, output
+    assert "COUNT: int\n" in output, output      # other AnnAssigns still stripped

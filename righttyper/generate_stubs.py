@@ -55,6 +55,16 @@ class PyiTransformer(cst.CSTTransformer):
                         )
                     ]))
             elif (isinstance(stmt, cst.SimpleStatementLine) and isinstance(stmt.body[0], cst.AnnAssign)):
+                # Keep __all__ whole, exactly as the Assign branch above does: a
+                # stub declaring an export list with no members is worse than the
+                # CSTValidationError this branch was added to avoid, because it
+                # is silent.  `__all__: list[str] = [...]` is a legal spelling and
+                # must not disagree with the bare `__all__ = [...]` form.
+                target = stmt.body[0].target
+                if isinstance(target, cst.Name) and target.value == '__all__':
+                    result.append(stmt)
+                    continue
+
                 result.append(cst.SimpleStatementLine(body=[
                     stmt.body[0].with_changes(value=None, equal=cst.MaybeSentinel.DEFAULT)
                 ]))
