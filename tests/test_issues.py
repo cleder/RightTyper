@@ -92,3 +92,42 @@ def test_issue_193_dataclass_init(tmp_path, monkeypatch):
     assert p.returncode == 0, p.stderr
     assert "code must be a code object" not in p.stderr
     assert "Point" in p.stdout      # the script really did run to completion
+
+
+def test_issue_193_mock_in_class_dict(tmp_path, monkeypatch):
+    """unwrap() must terminate on an object that synthesizes __wrapped__.
+
+    unwrap's cycle guard remembers objects by id, which cannot catch _Call: every
+    __wrapped__ access returns a brand-new child, so the id is never seen twice
+    and the loop allocated until the process was OOM-killed (exit 137, no output
+    at all). mock.patch.object() on a base-class method leaves exactly such an
+    object in a class __dict__, which recorder walks looking for overrides -- so
+    this hit ordinary mock-using test suites, righttyper's main workload.
+    """
+    t = textwrap.dedent("""\
+        from unittest.mock import call
+
+        class Base:
+            def m(self):
+                return 0
+
+        class Child(Base):
+            def m(self):
+                return 1
+
+        Base.m = call.patched
+
+        print(Child().m())
+        """)
+
+    monkeypatch.chdir(tmp_path)
+    Path("t.py").write_text(t)
+
+    p = subprocess.run(
+        [sys.executable, '-m', 'righttyper', 'run', '--root', '.', 't.py'],
+        capture_output=True, text=True, timeout=120,
+    )
+
+    assert p.returncode == 0, f"exit {p.returncode} (137 = OOM-killed)\n{p.stderr}"
+    annotated = Path("t.py").read_text()
+    assert "-> int" in annotated, annotated

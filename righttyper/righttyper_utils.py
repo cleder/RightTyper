@@ -11,6 +11,10 @@ from righttyper.logger import logger
 from righttyper.options import run_options
 
 
+# A functools.wraps chain is a handful of links; anything past this is pathological.
+_MAX_UNWRAP_DEPTH = 100
+
+
 def unwrap(method: abc.Callable|None) -> abc.Callable|None:
     """Follows a chain of `__wrapped__` attributes to find the original function."""
 
@@ -19,6 +23,16 @@ def unwrap(method: abc.Callable|None) -> abc.Callable|None:
     visited = {}
     while hasattr(method, "__wrapped__"):
         if id(method) in visited: return None
+
+        # The id check cannot catch an object that *synthesizes* attributes:
+        # unittest.mock's _Call answers any name with a brand-new child _Call, so
+        # __wrapped__ always exists and is never the same object twice.  Without a
+        # depth cap this loop allocates until the process is OOM-killed -- and
+        # mock.patch.object() on a base-class method puts exactly such an object
+        # in a class __dict__, which recorder walks.  Cap it, as inspect.unwrap
+        # does.  See #193.
+        if len(visited) >= _MAX_UNWRAP_DEPTH: return None
+
         visited[id(method)] = method
 
         method = getattr(method, "__wrapped__")
