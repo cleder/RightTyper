@@ -76,3 +76,39 @@ def test_issue_200(tmp_path, monkeypatch):
         if line.strip().startswith("def handle") and "-> int" in line
     )
     assert "Payload" in child_sig and "str" in child_sig, child_sig
+
+
+def test_issue_200_self_compatibility_check(tmp_path, monkeypatch):
+    """The Self-compatibility check in _clone_for_context needs the same guard.
+
+    Routing _is_subtype through safe_issubclass covered generalize, but
+    _CloneForContextT.__init__ has its own `issubclass(source, dest)` whose second
+    operand is caller-derived too -- and it sits in _propagate_to_parents, the very
+    path by which such classes arrive. A non-runtime_checkable Protocol with data
+    members raises there, and the run failed the same silent way: exit 0, nothing
+    rewritten.
+    """
+    t = textwrap.dedent("""\
+        from typing import Protocol
+
+        class Base(Protocol):
+            x: int
+            def handle(self, p): ...
+
+        class Child(Base):
+            x = 1
+            def handle(self, p):
+                return len(p)
+
+        Child().handle("xy")
+        """)
+
+    monkeypatch.chdir(tmp_path)
+    Path("t.py").write_text(t)
+
+    subprocess.run([sys.executable, '-m', 'righttyper', 'run', '--root', '.', 't.py'])
+
+    log = Path("righttyper.log")
+    assert not log.exists() or "runtime_checkable" not in log.read_text()
+    annotated = Path("t.py").read_text()
+    assert "-> int" in annotated, annotated
