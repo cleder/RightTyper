@@ -13,8 +13,16 @@ class CallableWithCode(Protocol):
 
 
 def has_code(obj: object) -> TypeGuard[CallableWithCode]:
-    """TypeGuard that narrows to CallableWithCode."""
-    return hasattr(obj, '__code__')
+    """TypeGuard that narrows to CallableWithCode.
+
+    CallableWithCode declares __code__ as a CodeType, so hasattr alone made this
+    guard lie: an object that synthesizes attributes (unittest.mock's _Call
+    answers any name with a child _Call) passes hasattr while its __code__ is
+    neither a code object nor even hashable, and callers went on to use it as a
+    dict key or hand it to sys.monitoring.  Check the type here so every caller
+    is covered, rather than each bolting on its own isinstance.  See #193.
+    """
+    return isinstance(getattr(obj, '__code__', None), CodeType)
 
 
 Filename = NewType("Filename", str)
