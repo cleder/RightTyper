@@ -54,3 +54,41 @@ def test_issue_193(tmp_path, monkeypatch):
 
     assert p.returncode == 0, p.stderr
     assert "_Call" not in p.stderr
+
+
+def test_issue_193_dataclass_init(tmp_path, monkeypatch):
+    # The dataclass/attrs/NamedTuple branch of the call handler reads __code__ off
+    # __init__/__new__, on a second path that the fix above didn't cover.  A class
+    # whose __init__ synthesizes a truthy non-code __code__ reached
+    # setup_monitoring_for_code() and killed the (process-global) handler.
+    t = textwrap.dedent("""\
+        import dataclasses
+        from unittest.mock import call
+
+        @dataclasses.dataclass
+        class Point:
+            x: int
+            y: int
+
+        class FakeInit:
+            __code__ = call.something   # truthy, non-code, unhashable
+
+            def __call__(self, *args, **kwargs):
+                pass
+
+        Point.__init__ = FakeInit()
+
+        print(type(Point(1, 2)).__name__)
+        """)
+
+    monkeypatch.chdir(tmp_path)
+    Path("t.py").write_text(t)
+
+    p = subprocess.run(
+        [sys.executable, '-m', 'righttyper', 'run', '--only-collect', 't.py'],
+        capture_output=True, text=True
+    )
+
+    assert p.returncode == 0, p.stderr
+    assert "code must be a code object" not in p.stderr
+    assert "Point" in p.stdout      # the script really did run to completion
