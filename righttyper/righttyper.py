@@ -748,7 +748,11 @@ def add_output_options(group=None):
 @click.option(
     "--exclude-test-files/--no-exclude-test-files",
     default=run_options.exclude_test_files,
-    help="Automatically exclude test modules from typing.",
+    help="Automatically exclude types originating in test modules from the generated"
+         " annotations. Test modules are still imported and traced: they are only"
+         " identified during pytest collection, after import, so this reduces output"
+         " noise rather than tracing overhead. Use --exclude-files to skip them"
+         " entirely.",
 )
 @click.option(
     "--include-functions",
