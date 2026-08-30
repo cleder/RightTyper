@@ -740,7 +740,10 @@ def add_output_options(group=None):
     type=str,
     multiple=True,
     callback=validate_fnmatch,
-    help="Exclude the given files (using fnmatch). Can be passed multiple times.",
+    help="Exclude the given files (using fnmatch). Patterns are resolved relative to the"
+         " current directory before matching, so write them as they appear in your project"
+         " (e.g. 'src/generated/*'); a leading '*/' makes a pattern match nothing."
+         " Can be passed multiple times.",
 )
 @click.option(
     "--exclude-test-files/--no-exclude-test-files",
