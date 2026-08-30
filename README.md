@@ -219,7 +219,53 @@ to make them more readable:
 - `--max-union-size N` — collapses large unions:
   `int | float | str | bytes | list` → `Any` (with N=4)
 
-### Option Overview
+## Troubleshooting
+
+### RightTyper exits successfully but writes no annotations
+
+Exceptions raised *after* your program finishes — while types are
+generalized and files are written — are logged and swallowed, so the run
+still exits 0 with nothing on the console. Look in `righttyper.log`, which
+is written to the working directory on every run, and re-run with
+`--allow-runtime-exceptions` to get the traceback and a non-zero exit.
+
+### `--exclude-files` does not exclude anything
+
+Patterns are made absolute before matching, so write them the way they
+appear in your project (`src/generated/*`). Prefixing a pattern with `*/`
+to "match anywhere" has the opposite effect: it produces an absolute
+pattern that matches nothing, silently.
+
+### Test modules are traced even with `--exclude-test-files`
+
+That option removes types *originating* in test modules from the
+annotations RightTyper writes. It cannot keep them from being traced:
+test modules are only identified during pytest collection, which happens
+after they have been imported. To avoid tracing them at all, exclude them
+by path with `--exclude-files`.
+
+### `--no-sampling-for` does not match my module
+
+It is matched against qualified *function* names (`MyClass.my_method`),
+never against module or file paths. To exempt a whole package from
+sampling, name its functions with a regular expression, or turn sampling
+off entirely with `--no-call-sampling`.
+
+### RightTyper crashes on a file I excluded
+
+Call and unwind monitoring is enabled process-wide, so RightTyper observes
+every call in the process regardless of which files you excluded.
+`--exclude-files` filters what gets *recorded*, not what gets *observed*.
+A crash inside RightTyper's own handlers can therefore be triggered by
+code in a file you excluded.
+
+### Much slower than expected
+
+The overhead figure above is measured with call sampling on, which is the
+default. `--no-call-sampling` records every invocation of every function
+and is substantially slower; it is a diagnostic setting, not a faster one.
+
+## Option Overview
 
 Below is the full list of options:
 
