@@ -794,7 +794,9 @@ def add_output_options(group=None):
     multiple=True,
     callback=validate_regexes,
     default=run_options.no_sampling_for,
-    help=f"Rather than sample, record every invocation of any functions matching the given regular expression. Can be passed multiple times.",
+    help=f"Rather than sample, record every invocation of any function whose qualified name"
+         f" ('co_qualname', e.g. 'MyClass.my_method') matches the given regular expression."
+         f" This does not match module or file paths. Can be passed multiple times.",
 )
 @click.option(
     "--replace-dict/--no-replace-dict",
