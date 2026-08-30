@@ -199,6 +199,27 @@ python3 -m righttyper run --only-collect -m pytest tests/integration/
 python3 -m righttyper process
 ```
 
+Each `--only-collect` run writes the next free `righttyper-N.rt` in the
+working directory, and `process` merges every `righttyper-*.rt` it finds
+there.
+
+To do the same across machines — sharding a suite over a CI matrix, say —
+collect on each shard and merge the files afterwards, keeping four things
+in mind:
+
+- **Rename the files before they meet.** Numbering restarts per
+  directory, so every shard writes `righttyper-1.rt`. Any suffix works
+  (`righttyper-shard1.rt`), since `process` globs.
+- **Use the same RightTyper build everywhere.** `process` refuses to
+  merge files whose format version differs.
+- **Run the same target on every shard.** The resolved path of the script
+  or module is recorded and must match across files. Differing pytest
+  arguments are fine — those are not part of the check.
+- **Check out to the same absolute path on every shard.** Observations
+  are keyed on source filenames as the interpreter reports them, which
+  are absolute; shards that use different checkout paths produce
+  observations that never merge.
+
 ### Output Formats
 
 - Annotated source files (default, with `.py.bak` backups)
