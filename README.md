@@ -48,6 +48,11 @@ backups as `.py.bak`). To preview annotations without modifying files,
 use `--no-output-files` — annotations will only be written to
 `righttyper.out`.
 
+For an end-to-end walkthrough — recommended invocations for annotating an
+existing codebase, what each output file contains, the inference
+limitations you are likely to meet, and how to triage the `mypy` errors
+that follow — see [RightTyper-workflow.md](RightTyper-workflow.md).
+
 ### Example
 
 Given this unannotated code:
