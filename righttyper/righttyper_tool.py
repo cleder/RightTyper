@@ -4,7 +4,9 @@ from typing import Any, Final
 from collections.abc import Callable
 import functools
 
-from righttyper.righttyper_types import CallableWithCode, has_code, CodeId, Filename, FunctionName
+from righttyper.righttyper_types import (
+    CallableWithCode, code_of, has_code, CodeId, Filename, FunctionName
+)
 from righttyper.righttyper_utils import unwrap, skip_this_file
 
 TOOL_NAME: Final[str] = "righttyper"
@@ -26,19 +28,8 @@ USE_LOCAL_EVENTS = True
 events = sys.monitoring.events
 
 
-def _code_of(obj: object) -> CodeType | None:
-    """Return obj's __code__, but only if it is a real code object.
-
-    Some objects synthesize arbitrary attributes from __getattr__ rather than
-    raising: unittest.mock's _Call returns a child _Call for any name, and _Call
-    is unhashable, so it must not reach our code-keyed dicts and sets.
-    """
-    code = getattr(obj, "__code__", None)
-    return code if isinstance(code, CodeType) else None
-
-
 def _call_handler(code: CodeType, offset: int, callable: Callable, arg0: object) -> Any:
-    callee_code = _code_of(callable)
+    callee_code = code_of(callable)
 
     # Check __dict__ directly to avoid triggering __getattr__ (e.g., on MagicMock)
     wrapped = (
@@ -53,7 +44,7 @@ def _call_handler(code: CodeType, offset: int, callable: Callable, arg0: object)
         and (wrapped_code := wrapped.__code__) in setup_code
     ):
         # For class instances, the executing code is __call__'s code
-        wrapper_code = callee_code or _code_of(
+        wrapper_code = callee_code or code_of(
             getattr(type(callable), "__call__", None)
         )
         if wrapper_code and wrapper_code is not wrapped_code:
@@ -65,7 +56,7 @@ def _call_handler(code: CodeType, offset: int, callable: Callable, arg0: object)
         callee_code in setup_code
         or (
             wrapped is not None
-            and (callee_code := _code_of(callable := wrapped)) in setup_code
+            and (callee_code := code_of(callable := wrapped)) in setup_code
         )
     ):
         call_mapping[(code, offset)] = callable
@@ -80,7 +71,7 @@ def _call_handler(code: CodeType, offset: int, callable: Callable, arg0: object)
             target = getattr(callable, '__new__', None)
         else:
             target = getattr(callable, '__init__', None)
-        target_code = _code_of(target)
+        target_code = code_of(target)
         mod = sys.modules.get(callable.__module__)
         source_file = getattr(mod, '__file__', None)
         if target_code and source_file and not skip_this_file(source_file):
