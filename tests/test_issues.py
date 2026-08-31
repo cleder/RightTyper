@@ -362,6 +362,56 @@ def test_issue_199_synthetic_arg_does_not_erase_observations(tmp_path, monkeypat
     )
 
 
+def test_issue_199_sole_synthetic_arg_is_not_annotated(tmp_path, monkeypatch):
+    """The filler must not be the annotation when it is the only observation.
+
+    A wrapper that returns without calling through still completes a synthetic
+    trace for the wrapped function, so an unbound required parameter can have the
+    filler as its *only* observation. `Never` is the union identity, which is what
+    makes it right for merging -- but a lone `Never` survives from_set() and
+    _merge_set() untouched, and `Never` is uninhabited: annotating an unobserved
+    parameter with it rejects every caller.
+
+    Under the default --no-use-typing-never this is masked, because NeverSayNeverT
+    renames Never to Any and the transformer drops Any annotations. Assert both
+    modes, since only one of them was ever exercised.
+    """
+    t = textwrap.dedent("""\
+        import functools
+
+        def deco(f):
+            @functools.wraps(f)
+            def wrapper(a):
+                return 0        # never calls through
+            return wrapper
+
+        # b is required, so bind_partial()/apply_defaults() cannot fill it
+        @deco
+        def target(a, b):
+            return a + b
+
+        print(target(1))
+        """)
+
+    monkeypatch.chdir(tmp_path)
+
+    for opt in ('--use-typing-never', '--no-use-typing-never'):
+        Path("t.py").write_text(t)
+
+        subprocess.run([sys.executable, '-m', 'righttyper', 'run', '--root', '.', opt, 't.py'])
+
+        annotated = Path("t.py").read_text()
+        sig = next(
+            line for line in annotated.splitlines()
+            if line.strip().startswith("def target")
+        )
+        # `a` is bound by the synthetic trace and legitimately annotated; `b`
+        # was never observed at all, so it must be left alone.
+        assert sig.strip() == "def target(a: int, b) -> int:", (
+            f"{opt}: {sig!r}\n--- full file ---\n{annotated}"
+        )
+
+
 def test_issue_200_self_compatibility_check(tmp_path, monkeypatch):
     """The Self-compatibility check in _clone_for_context needs the same guard.
 
