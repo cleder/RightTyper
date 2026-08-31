@@ -226,6 +226,64 @@ def test_issue_193_mock_in_class_dict(tmp_path, monkeypatch):
     assert "-> int" in annotated, annotated
 
 
+def test_issue_193_raising_getattr(tmp_path, monkeypatch):
+    """The process-global CALL handler must not raise on a hostile __getattr__.
+
+    getattr suppresses only AttributeError, and the handler probes __code__ on
+    every callable in the process and __wrapped__ along every wrapper chain. An
+    object whose __getattr__ raises something else -- a lazy-import proxy's
+    ImportError, a dict-backed proxy's KeyError -- had that exception surface
+    inside the program under observation, at the call instruction. Same failure
+    class as the _Call crash: see #193.
+    """
+    t = textwrap.dedent("""\
+        class Proxy:
+            "__code__ probe: __getattr__ raises something getattr won't suppress"
+            def __getattr__(self, name):
+                raise ImportError(f"cannot resolve {name}")
+
+            def __call__(self, x):
+                return x + 1
+
+        class RaisingLink:
+            def __getattr__(self, name):
+                raise KeyError(name)
+
+            def __call__(self, x):
+                return x
+
+        class Wrapper:
+            "__wrapped__ probe: in __dict__, so unwrap() walks into RaisingLink"
+            def __init__(self, inner):
+                self.__wrapped__ = inner
+
+            def __call__(self, x):
+                return self.__wrapped__(x)
+
+        def observed(v):
+            return v * 2
+
+        print(Proxy()(1))
+        print(Wrapper(RaisingLink())(2))
+        print(observed(3))
+        """)
+
+    monkeypatch.chdir(tmp_path)
+    Path("t.py").write_text(t)
+
+    p = subprocess.run(
+        [sys.executable, '-m', 'righttyper', 'run', '--root', '.', 't.py'],
+        capture_output=True, text=True, timeout=120,
+    )
+
+    assert p.returncode == 0, f"exit {p.returncode}\n{p.stderr}"
+    assert "ImportError" not in p.stderr and "KeyError" not in p.stderr, p.stderr
+
+    # and recording carried on rather than being derailed
+    annotated = Path("t.py").read_text()
+    assert "def observed(v: int) -> int:" in annotated, annotated
+
+
 def test_issue_197_unhashable_class_on_recording_path(tmp_path, monkeypatch):
     """The recording path keys tables by type too, ahead of lub() and TypeMap.
 
