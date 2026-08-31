@@ -245,6 +245,37 @@ def test_typemap_skips_unhashable_type():
     assert tm.find(Nameable) != []
 
 
+def test_typemap_and_lookup_tolerate_raising_hash():
+    """A __hash__ that raises anything must be skipped and looked up alike.
+
+    is_hashable() -- which decides what the map build skips -- treats any
+    exception from hash() as unhashable, so the lookups have to catch as broadly
+    or a class whose __hash__ raises RuntimeError sails past the build and then
+    aborts the lookup instead.  Regression test for issue #197.
+    """
+    class Meta(type):
+        def __hash__(cls) -> int:
+            raise RuntimeError("no hashing here")
+
+    class Hostile(metaclass=Meta):
+        pass
+
+    class Nameable:
+        pass
+
+    # Premise: hash() raises, and it isn't a TypeError.
+    with pytest.raises(RuntimeError):
+        hash(Hostile)
+
+    tm = TypeMap({'Hostile': Hostile, 'Nameable': Nameable})
+    assert tm.find(Hostile) == []
+    assert tm.find(Nameable) != []
+
+    # The recording path's type-keyed lookups, well before TypeMap runs.
+    assert t_id._lookup_type({int: 'int'}, Hostile) is None
+    assert t_id.get_value_type(Hostile()) is not None
+
+
 def test_items_from_typing():
     assert TypeInfo("typing", "Any") == get_type_name(Any)
     assert TypeInfo("typing", "Self") == get_type_name(Self)
