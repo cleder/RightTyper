@@ -9,7 +9,7 @@ from pathlib import Path
 import logging
 from righttyper.logger import logger
 from righttyper.righttyper_types import ArgumentName, VariableName, Filename, CodeId, CallableWithCode, cast_not_None
-from righttyper.typeinfo import TypeInfo, NoneTypeInfo, UnknownTypeInfo, NeverTypeInfo, CallTrace, UnionTypeInfo
+from righttyper.typeinfo import TypeInfo, NoneTypeInfo, UnknownTypeInfo, MissingTypeInfo, CallTrace, UnionTypeInfo
 from typing import Final, Any, NewType, overload
 import typing
 from righttyper.observations import Observations, FuncInfo, OverriddenFunction, ArgInfo
@@ -136,8 +136,14 @@ class PendingCallTrace:
         # "this trace saw nothing here" should mean. UnknownTypeInfo is Any, and
         # Any *subsumes* a union instead of vanishing from it, so it discarded
         # every genuine observation the parameter had elsewhere.
+        #
+        # MissingTypeInfo rather than NeverTypeInfo: when the synthetic trace is
+        # the *only* trace for that parameter there is nothing to displace the
+        # filler, and a lone Never renders as an uninhabited annotation. The two
+        # compare equal, so merging is unaffected; the mark only lets the
+        # finalizer drop a survivor.
         self.args_start: tuple[TypeInfo, ...] = tuple(
-            t if t is not None else NeverTypeInfo
+            t if t is not None else MissingTypeInfo
             for t in self._get_arg_types(arg_info, arg_info.locals)
         )
         self.yields: set[TypeInfo] = set()
