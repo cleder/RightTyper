@@ -41,10 +41,12 @@ class TypeMap:
         #
         # try/except rather than is_hashable(): this runs once per type node in
         # every annotation, and the probe would hash a second time on every one
-        # of the overwhelmingly common hashable lookups.
+        # of the overwhelmingly common hashable lookups.  It catches what
+        # is_hashable does -- any Exception -- so that the class the build skipped
+        # is exactly the class the lookup declines to name; see _lookup_type.
         try:
             return self._map.get(t, [])
-        except TypeError:
+        except Exception:
             return []
 
 
