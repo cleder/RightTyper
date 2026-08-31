@@ -238,10 +238,19 @@ def _lookup_type(table: dict[type, _V], t: type) -> _V | None:
     answer rather than a crash, and this runs on the recording path, well before
     lub() or TypeMap get a chance to guard it.  try/except keeps the common
     hashable case free of any extra probe.  See #197.
+
+    Catches ``Exception``, not just the ``TypeError`` that ``__hash__ = None``
+    raises, so that this agrees with ``is_hashable``: it is what decides which
+    classes get skipped while building the type maps, and it treats *any*
+    exception from ``hash()`` as unhashable.  Catching less here would let a
+    class whose ``__hash__`` raises, say, RuntimeError past the build unnoticed
+    and then crash the lookup.  Unlike ``safe_issubclass``, breadth costs nothing
+    in accuracy: a key that cannot be hashed cannot be in the table, so a miss is
+    the truth however the hash failed.
     """
     try:
         return table.get(t)
-    except TypeError:
+    except Exception:
         return None
 
 
