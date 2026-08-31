@@ -1,6 +1,7 @@
 import os
 import sys
 import fnmatch
+import typing
 import collections.abc as abc
 
 from functools import cache
@@ -15,13 +16,32 @@ from righttyper.options import run_options
 _MAX_UNWRAP_DEPTH = 100
 
 
+_ABSENT: typing.Final = object()
+
+
+def _wrapped_of(obj: object) -> typing.Any:
+    """``obj.__wrapped__``, or ``_ABSENT`` if it has none -- or refuses to say.
+
+    getattr suppresses only AttributeError; a ``__getattr__`` raising anything
+    else (a lazy-import proxy's ImportError, a dict-backed proxy's KeyError)
+    would escape from the process-global CALL handler into the program under
+    observation.  "Not a wrapper" is the answer that keeps it running.  Broad,
+    unlike safe_issubclass: there a swallowed exception would skew an inferred
+    type, here it can only leave a wrapper unresolved.
+    """
+    try:
+        return getattr(obj, "__wrapped__", _ABSENT)
+    except Exception:
+        return _ABSENT
+
+
 def unwrap(method: abc.Callable|None) -> abc.Callable|None:
     """Follows a chain of `__wrapped__` attributes to find the original function."""
 
     # Remember objects by id to work around unhashable items, but point to object so
     # that the object can't go away (possibly reusing the id)
     visited = {}
-    while hasattr(method, "__wrapped__"):
+    while (wrapped := _wrapped_of(method)) is not _ABSENT:
         if id(method) in visited: return None
 
         # The id check cannot catch an object that *synthesizes* attributes:
@@ -31,11 +51,13 @@ def unwrap(method: abc.Callable|None) -> abc.Callable|None:
         # mock.patch.object() on a base-class method puts exactly such an object
         # in a class __dict__, which recorder walks.  Cap it, as inspect.unwrap
         # does.  See #193.
-        if len(visited) >= _MAX_UNWRAP_DEPTH: return None
+        if len(visited) >= _MAX_UNWRAP_DEPTH:
+            logger.debug(f"unwrap: giving up after {_MAX_UNWRAP_DEPTH} __wrapped__ links")
+            return None
 
         visited[id(method)] = method
 
-        method = getattr(method, "__wrapped__")
+        method = wrapped
 
     return method
 
