@@ -276,6 +276,38 @@ def test_typemap_and_lookup_tolerate_raising_hash():
     assert t_id.get_value_type(Hostile()) is not None
 
 
+def test_typemap_recursion_does_not_invoke_metaclass_eq():
+    """Recursing into a class skipped as unhashable must not compare it either.
+
+    The unhashable-class guard names nothing but still recurses, so the scan now
+    reaches the cycle check with such a class on the path.  A metaclass that
+    fails to hash may equally raise from __eq__, and the check used `not in` --
+    equality -- where identity was all it ever needed.  Regression test for
+    issue #197.
+    """
+    class Meta(type):
+        def __hash__(cls) -> int:
+            raise RuntimeError("no hashing here")
+
+        def __eq__(cls, other: object) -> bool:
+            raise RuntimeError("no comparing here")
+
+    class Outer(metaclass=Meta):
+        class Inner:
+            pass
+
+    # Premise: both operations on this class raise.
+    with pytest.raises(RuntimeError):
+        hash(Outer)
+    with pytest.raises(RuntimeError):
+        Outer == object
+
+    # Must not raise, and must still name the nested class the recursion found.
+    tm = TypeMap({'Outer': Outer})
+    assert tm.find(Outer) == []
+    assert tm.find(Outer.Inner) != []
+
+
 def test_items_from_typing():
     assert TypeInfo("typing", "Any") == get_type_name(Any)
     assert TypeInfo("typing", "Self") == get_type_name(Self)
