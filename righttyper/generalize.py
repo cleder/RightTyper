@@ -11,6 +11,12 @@ from righttyper.options import output_options
 from righttyper.righttyper_utils import is_hashable, safe_issubclass
 
 
+# _safe_getattr's default doubles as its "not found" answer, so None cannot be
+# both.  A unique sentinel keeps "no such attribute" distinct from "attribute
+# whose value is None".
+_MISSING: Any = object()
+
+
 # Bounded, not @cache: the key is a type object and the entry holds it alive, so
 # an unbounded table pins every class ever probed -- including the ones a long
 # pytest run manufactures per test (make_dataclass, namedtuple, mock autospec)
@@ -31,10 +37,17 @@ def _probed_attrs(type_obj: type) -> frozenset[str]:
     would have supplied.  The first direction only widens ``common_attrs``, so
     Rule 7 merges strictly less; the second can narrow it.  Not executing
     third-party descriptor code is the point, and is worth that.
+
+    The set is a snapshot taken the first time a type is probed.  A class mutated
+    afterwards (monkeypatching, a late ``setattr``) keeps the attributes it had
+    then; re-probing on every call to catch that would give up the saving the
+    cache exists for, and this set only feeds a conservative safety filter.
     """
     return frozenset(
         attr for attr in dir(type_obj)
-        if _safe_getattr(type_obj, attr) is not None
+        # A sentinel, not None: an attribute whose value is None is still an
+        # attribute the class has.
+        if _safe_getattr(type_obj, attr, _MISSING) is not _MISSING
         if not attr.startswith("_") or attr.startswith("__")
     )
 
@@ -496,14 +509,15 @@ def _merge_set(
                 # as it did there -- the singleton path reaches this without ever
                 # calling lub(), so guarding Rule 7 alone left it exposed.
                 #
-                # _safe_getattr answers None for an attribute it cannot resolve,
-                # so None means "not usable from this class"; that is already how
-                # _probed_attrs filters, and treating it as absent here can only
-                # decline a de-privatization, never invent one.
+                # Probe against _MISSING rather than None: _safe_getattr returns
+                # its default for an attribute it cannot resolve, so a default of
+                # None makes an attribute whose value *is* None indistinguishable
+                # from an absent one -- and a base and subclass sharing such an
+                # attribute would then fail this check and stay private.
                 check_attrs = accessed_attributes or _probed_attrs(t.type_obj)
                 if all(
-                    (a := _safe_getattr(public_base, attr)) is not None
-                    and a is _safe_getattr(t.type_obj, attr)
+                    (a := _safe_getattr(public_base, attr, _MISSING)) is not _MISSING
+                    and a is _safe_getattr(t.type_obj, attr, _MISSING)
                     for attr in check_attrs
                 ):
                     return get_type_name(public_base)
