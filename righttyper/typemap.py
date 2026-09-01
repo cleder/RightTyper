@@ -186,7 +186,16 @@ class TypeMap:
                         )
                     )
 
-                if isinstance(obj, (type, types.ModuleType)) and obj not in objs_in_path:
+                # Identity, not equality: `obj not in objs_in_path` calls __eq__,
+                # and a metaclass that defines a failing __hash__ may well define
+                # a raising __eq__ too -- so the guard just above would decline to
+                # hash the class and then this check would crash on it anyway.
+                # Cycle detection only ever needed identity; the list is recursion
+                # depth, so scanning it costs nothing.
+                if (
+                    isinstance(obj, (type, types.ModuleType))
+                    and not any(obj is seen for seen in objs_in_path)
+                ):
                     self._add_types_from(
                         work_map,
                         obj.__dict__,
