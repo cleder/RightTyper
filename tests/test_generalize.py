@@ -1196,6 +1196,30 @@ def test_merged_types_still_deprivatizes():
     assert result.type_obj is Base
 
 
+def test_merged_types_deprivatizes_with_none_valued_attribute():
+    """An attribute whose value is None is still an attribute the class has.
+
+    _safe_getattr returns its default for an attribute it cannot resolve, so
+    probing with a default of None made `marker = None` indistinguishable from
+    "no such attribute": the base and the subclass both looked like they lacked
+    it, the check failed, and the type stayed needlessly private.
+    """
+    from righttyper.generalize import merged_types
+
+    class NoneAttrBase:
+        marker = None
+
+    class _PrivateNoneAttr(NoneAttrBase):
+        pass
+
+    # Premise: the attribute is genuinely there, and its value is None.
+    assert _PrivateNoneAttr.marker is None
+
+    result = merged_types({TypeInfo.from_type(_PrivateNoneAttr)},
+                          accessed_attributes={"marker"})
+    assert result.type_obj is NoneAttrBase
+
+
 def test_lub_mro_no_useful_base():
     """lub(int, str) stays as union (only 'object' in common)."""
     from righttyper.generalize import lub
