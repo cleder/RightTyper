@@ -12,9 +12,42 @@ class CallableWithCode(Protocol):
     def __call__(self, *args: Any, **kwargs: Any) -> Any: ...
 
 
+def code_of(obj: object) -> CodeType | None:
+    """Return obj's ``__code__``, but only if it is a real code object.
+
+    Two ways a plain ``getattr(obj, "__code__", None)`` misleads, both of which
+    reach the process-global CALL handler:
+
+    An object may *synthesize* the attribute rather than raise -- unittest.mock's
+    _Call answers any name with a child _Call, which is neither a code object nor
+    even hashable, and callers went on to use it as a dict key or to hand it to
+    sys.monitoring.  Hence the isinstance check.
+
+    An object may also raise something other than AttributeError from
+    ``__getattr__``, which getattr does not suppress: a lazy-import proxy raising
+    ImportError, a dict-backed one raising KeyError.  There the exception would
+    surface inside the monitored program, from a handler registered for every
+    call in the process -- so catch broadly, unlike safe_issubclass.  A swallowed
+    failure means "not code we can annotate", which is honest; letting it out
+    takes down the program under observation.  The try costs nothing until it
+    fires: ``__code__`` on a real function resolves without ever reaching
+    ``__getattr__``.  See #193.
+    """
+    try:
+        code = getattr(obj, '__code__', None)
+    except Exception:
+        return None
+
+    return code if isinstance(code, CodeType) else None
+
+
 def has_code(obj: object) -> TypeGuard[CallableWithCode]:
-    """TypeGuard that narrows to CallableWithCode."""
-    return hasattr(obj, '__code__')
+    """TypeGuard that narrows to CallableWithCode.
+
+    CallableWithCode declares __code__ as a CodeType, so hasattr alone made this
+    guard lie.  Defer to code_of so there is a single probe to keep honest.
+    """
+    return code_of(obj) is not None
 
 
 Filename = NewType("Filename", str)

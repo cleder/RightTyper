@@ -195,3 +195,62 @@ def test_stubs_all_variable(tmp_path, monkeypatch):
             def __init__(self, x): ...
         def baz() -> float: ...
         """)
+
+
+def test_stubs_annassign_with_value():
+    code = textwrap.dedent("""\
+        COUNT: int = 5
+
+        def f(x: int) -> int:
+            return x + COUNT
+        """
+    )
+    output = generate_stub(code)
+    assert output == textwrap.dedent("""\
+        COUNT: int
+        def f(x: int) -> int: ...
+        """)
+
+
+def test_stubs_annotated_all_variable_keeps_value():
+    # An annotated __all__ must survive whole, like the bare form above: stripping
+    # the value leaves a stub that declares an export list with no members, which
+    # is a silent version of the crash the AnnAssign branch was added to avoid.
+    code = textwrap.dedent("""\
+        __all__: list[str] = [
+            "foo",
+            "Bar"
+        ]
+
+        COUNT: int = 5
+
+        def foo() -> int:
+            return 42
+
+        class Bar(object):
+            pass
+        """
+    )
+    output = generate_stub(code)
+    assert '"foo"' in output and '"Bar"' in output, output
+    assert "COUNT: int\n" in output, output      # other AnnAssigns still stripped
+
+
+def test_stubs_all_on_a_shared_line_keeps_only_all():
+    # Keeping __all__ whole means keeping __all__, not its line-mates: a small
+    # statement after a semicolon would otherwise ride into the stub with its
+    # value, though handle_body never looked at it.
+    code = textwrap.dedent("""\
+        __all__ = ["foo"]; COUNT = 5
+        __version__: str = "1.0"; DEBUG: bool = False
+
+        def foo() -> int:
+            return 42
+        """
+    )
+    output = generate_stub(code)
+    assert output.splitlines()[0] == '__all__ = ["foo"]', output
+    assert "= 5" not in output, output
+    # ... and no semicolon left dangling behind what does survive
+    assert "__version__: str\n" in output, output
+    assert "= False" not in output, output

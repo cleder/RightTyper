@@ -2,12 +2,54 @@ from typing import cast, Sequence, Iterator, Any, Never, NoReturn
 from abc import ABCMeta
 import collections.abc as abc
 from collections import Counter
-from functools import cache
+from functools import cache, lru_cache
 from types import EllipsisType
 import sys
 from righttyper.typeinfo import TypeInfo, ListTypeInfo, CallTrace, NoneTypeInfo
-from righttyper.type_id import get_type_name
+from righttyper.type_id import get_type_name, _safe_getattr
 from righttyper.options import output_options
+from righttyper.righttyper_utils import is_hashable, safe_issubclass
+
+
+# _safe_getattr's default doubles as its "not found" answer, so None cannot be
+# both.  A unique sentinel keeps "no such attribute" distinct from "attribute
+# whose value is None".
+_MISSING: Any = object()
+
+
+# Bounded, not @cache: the key is a type object and the entry holds it alive, so
+# an unbounded table pins every class ever probed -- including the ones a long
+# pytest run manufactures per test (make_dataclass, namedtuple, mock autospec)
+# -- for the lifetime of the process.  A cap keeps the ~17x saving on the small
+# working set that lub() actually revisits, without the retention.
+@lru_cache(maxsize=2048)
+def _probed_attrs(type_obj: type) -> frozenset[str]:
+    """The attributes of ``type_obj`` that lub()'s Rule 7 safety filter considers.
+
+    ``_safe_getattr`` uses ``inspect.getattr_static``, which costs ~17x a plain
+    ``getattr``; lub() re-probes the same handful of types thousands of times in a
+    single run, so memoize the probe per type.
+
+    Note this is not only a memoization of the previous ``getattr`` probe: a
+    static lookup answers for attributes a dynamic one cannot resolve (``type``
+    gains ``__abstractmethods__``, ``__annotate__``, ``__annotations__`` and
+    ``__text_signature__``), and drops any that only a metaclass ``__getattr__``
+    would have supplied.  The first direction only widens ``common_attrs``, so
+    Rule 7 merges strictly less; the second can narrow it.  Not executing
+    third-party descriptor code is the point, and is worth that.
+
+    The set is a snapshot taken the first time a type is probed.  A class mutated
+    afterwards (monkeypatching, a late ``setattr``) keeps the attributes it had
+    then; re-probing on every call to catch that would give up the saving the
+    cache exists for, and this set only feeds a conservative safety filter.
+    """
+    return frozenset(
+        attr for attr in dir(type_obj)
+        # A sentinel, not None: an attribute whose value is None is still an
+        # attribute the class has.
+        if _safe_getattr(type_obj, attr, _MISSING) is not _MISSING
+        if not attr.startswith("_") or attr.startswith("__")
+    )
 
 
 # Types that are covariant (immutable), so merging their type arguments
@@ -110,8 +152,24 @@ def _find_common_container_abc(t1: TypeInfo, t2: TypeInfo) -> type | None:
     return None
 
 
-@cache
 def _is_private_type(cls: type) -> bool:
+    """Whether cls is defined in a private module without public re-export.
+
+    Uncached front for the cached probe below: ``@cache`` hashes its argument, and
+    an unhashable class must not reach it.  ``_merge_set``'s singleton path calls
+    this before any pairwise ``lub()``, so ``lub()``'s own guard does not cover it.
+
+    An unhashable class is reported as *not* private, which is the conservative
+    answer: it leaves the type alone rather than triggering a de-privatizing MRO
+    walk on a class we could not probe.
+    """
+    if not is_hashable(cls):
+        return False
+    return _is_private_type_cached(cls)
+
+
+@cache
+def _is_private_type_cached(cls: type) -> bool:
     """Check if cls is defined in a private module without public re-export.
 
     This partially duplicates TypeMap's is_private logic; done here to avoid
@@ -148,7 +206,7 @@ def _is_subtype(a: type, b: type) -> bool:
     """Check if a is a subtype of b, including the numeric tower."""
     if a is b:
         return True
-    if issubclass(a, b):
+    if safe_issubclass(a, b):
         return True
     # Numeric tower: int <: float <: complex. Walk a's MRO for the nearest
     # tower entry, then promote up the tower checking against b.
@@ -157,7 +215,7 @@ def _is_subtype(a: type, b: type) -> bool:
             t = ancestor
             while t in _NUMERIC_TOWER:
                 t = _NUMERIC_TOWER[t]
-                if issubclass(t, b):
+                if safe_issubclass(t, b):
                     return True
             break
     return False
@@ -214,6 +272,13 @@ def lub(
     # Without a real type (could be None or a typing special form),
     # no merging rules apply.
     if not isinstance(a.type_obj, type) or not isinstance(b.type_obj, type):
+        return TypeInfo.from_set_new({a, b})
+
+    # Every merging rule below hashes both type objects, so an unhashable class
+    # (metaclass defining __eq__ without __hash__) has to bail out here.  Safe to
+    # build the union: TypeInfo excludes type_obj from comparison, so hashing a
+    # TypeInfo never touches it.
+    if not is_hashable(a.type_obj) or not is_hashable(b.type_obj):
         return TypeInfo.from_set_new({a, b})
 
     # Rule 4: Subtype check (MRO + numeric tower)
@@ -305,7 +370,7 @@ def lub(
             # explicitly inherited, e.g. Generator → Iterator → Iterable)
             common: type | None = None
             for cls in ne_obj.__mro__:
-                if issubclass(e_obj, cls) and cls is not object:
+                if safe_issubclass(e_obj, cls) and cls is not object:
                     common = cls
                     break
             else:
@@ -336,9 +401,9 @@ def lub(
     ):
         a_obj, b_obj = cast(type, a.type_obj), cast(type, b.type_obj)
         common = None
-        if issubclass(a_obj, b_obj):
+        if safe_issubclass(a_obj, b_obj):
             common = b_obj
-        elif issubclass(b_obj, a_obj):
+        elif safe_issubclass(b_obj, a_obj):
             common = a_obj
         if (
             common is not None
@@ -356,15 +421,7 @@ def lub(
         else:
             # Without accessed_attributes, use dir() intersection as safety filter:
             # only merge to a supertype that has all the shared attributes.
-            common_attrs = (
-                {attr for attr in dir(a.type_obj)
-                 if getattr(a.type_obj, attr, None) is not None
-                 if not attr.startswith("_") or attr.startswith("__")}
-                &
-                {attr for attr in dir(b.type_obj)
-                 if getattr(b.type_obj, attr, None) is not None
-                 if not attr.startswith("_") or attr.startswith("__")}
-            )
+            common_attrs = _probed_attrs(a.type_obj) & _probed_attrs(b.type_obj)
         a_mro = set(a.type_obj.__mro__)
         for base in b.type_obj.__mro__:
             if base in a_mro and base is not object:
@@ -445,15 +502,22 @@ def _merge_set(
             )
             if public_base is not None:
                 # De-privatize if the public ancestor has all accessed attributes.
-                sentinel = object()
-                check_attrs = accessed_attributes or frozenset(
-                    attr for attr in dir(t.type_obj)
-                    if getattr(t.type_obj, attr, None) is not None
-                    if not attr.startswith("_") or attr.startswith("__")
-                )
+                #
+                # Probe statically here too: this is the same dir()-intersection
+                # filter as Rule 7, on the same arbitrary third-party types, and a
+                # plain getattr runs their descriptors.  #188 crashed here exactly
+                # as it did there -- the singleton path reaches this without ever
+                # calling lub(), so guarding Rule 7 alone left it exposed.
+                #
+                # Probe against _MISSING rather than None: _safe_getattr returns
+                # its default for an attribute it cannot resolve, so a default of
+                # None makes an attribute whose value *is* None indistinguishable
+                # from an absent one -- and a base and subclass sharing such an
+                # attribute would then fail this check and stay private.
+                check_attrs = accessed_attributes or _probed_attrs(t.type_obj)
                 if all(
-                    (a := getattr(public_base, attr, sentinel)) is not sentinel
-                    and a is getattr(t.type_obj, attr, sentinel)
+                    (a := _safe_getattr(public_base, attr, _MISSING)) is not _MISSING
+                    and a is _safe_getattr(t.type_obj, attr, _MISSING)
                     for attr in check_attrs
                 ):
                     return get_type_name(public_base)

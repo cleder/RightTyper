@@ -3,6 +3,20 @@ import collections.abc as abc
 import libcst as cst
 
 
+def _only(stmt: cst.SimpleStatementLine) -> cst.SimpleStatementLine:
+    """The line with just its first small statement, semicolon dropped.
+
+    `__all__ = [...]; COUNT = 5` is one SimpleStatementLine holding two small
+    statements, and handle_body only ever examines the first.  The branches that
+    keep __all__ whole must keep only *it*, or the line-mate rides into the stub
+    with its value -- while every other branch simply drops what follows a
+    semicolon.
+    """
+    return stmt.with_changes(body=[
+        stmt.body[0].with_changes(semicolon=cst.MaybeSentinel.DEFAULT)
+    ])
+
+
 class PyiTransformer(cst.CSTTransformer):
     def __init__(self: Self) -> None:
         self._needs_any = False
@@ -41,7 +55,7 @@ class PyiTransformer(cst.CSTTransformer):
 
                 if any (isinstance(target.target, cst.Name) and target.target.value == '__all__'
                         for target in stmt.body[0].targets):
-                    result.append(stmt)
+                    result.append(_only(stmt))
                     continue
 
                 for target in stmt.body[0].targets:
@@ -55,8 +69,24 @@ class PyiTransformer(cst.CSTTransformer):
                         )
                     ]))
             elif (isinstance(stmt, cst.SimpleStatementLine) and isinstance(stmt.body[0], cst.AnnAssign)):
+                # Keep __all__ whole, exactly as the Assign branch above does: a
+                # stub declaring an export list with no members is worse than the
+                # CSTValidationError this branch was added to avoid, because it
+                # is silent.  `__all__: list[str] = [...]` is a legal spelling and
+                # must not disagree with the bare `__all__ = [...]` form.
+                target = stmt.body[0].target
+                if isinstance(target, cst.Name) and target.value == '__all__':
+                    result.append(_only(stmt))
+                    continue
+
+                # semicolon too: dropping the line-mates left it dangling behind
+                # the declaration, as in `__version__: str; `
                 result.append(cst.SimpleStatementLine(body=[
-                    stmt.body[0].with_changes(value=None)
+                    stmt.body[0].with_changes(
+                        value=None,
+                        equal=cst.MaybeSentinel.DEFAULT,
+                        semicolon=cst.MaybeSentinel.DEFAULT
+                    )
                 ]))
 
         return result
