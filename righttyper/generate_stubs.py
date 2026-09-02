@@ -55,6 +55,12 @@ class PyiTransformer(cst.CSTTransformer):
                         )
                     ]))
             elif (isinstance(stmt, cst.SimpleStatementLine) and isinstance(stmt.body[0], cst.AnnAssign)):
+                if not isinstance(stmt.body[0].target, cst.Name):
+                    # mypy rejects an annotated `c.x` or `d["k"]` in a stub, and
+                    # function bodies are `...` by the time we get here, so no
+                    # legitimate declaration is lost by dropping these.
+                    continue
+
                 result.append(cst.SimpleStatementLine(body=[
                     # AnnAssign rejects a None value while the `=` token survives
                     stmt.body[0].with_changes(value=None, equal=cst.MaybeSentinel.DEFAULT)

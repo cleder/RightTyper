@@ -227,3 +227,21 @@ def test_stubs_class_annassign_with_value():
             x: int
             def f(self) -> int: ...
         """)
+
+
+def test_stubs_annassign_non_name_target():
+    # A stub cannot declare a type for either target: mypy answers "Type cannot be
+    # declared in assignment to non-self attribute" and "Unexpected type declaration".
+    code = textwrap.dedent("""\
+        class C: pass
+        c = C()
+        c.x: int = 5
+        d: dict = {}
+        d["k"]: int = 5
+        y: int = 1
+        """
+    )
+    output = generate_stub(code)
+    assert "c.x" not in output, output
+    assert 'd["k"]' not in output, output
+    assert "y: int\n" in output, output
