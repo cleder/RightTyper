@@ -195,3 +195,35 @@ def test_stubs_all_variable(tmp_path, monkeypatch):
             def __init__(self, x): ...
         def baz() -> float: ...
         """)
+
+
+def test_stubs_annassign_with_value():
+    code = textwrap.dedent("""\
+        COUNT: int = 5
+
+        def f(x: int) -> int:
+            return x + COUNT
+        """
+    )
+    output = generate_stub(code)
+    assert output == textwrap.dedent("""\
+        COUNT: int
+        def f(x: int) -> int: ...
+        """)
+
+
+def test_stubs_class_annassign_with_value():
+    code = textwrap.dedent("""\
+        class C:
+            x: int = 5
+
+            def f(self) -> int:
+                return self.x
+        """
+    )
+    output = generate_stub(code)
+    assert output == textwrap.dedent("""\
+        class C:
+            x: int
+            def f(self) -> int: ...
+        """)
