@@ -276,3 +276,40 @@ def test_stubs_annotated_all_variable_keeps_value():
         class Bar(object):
             pass
         """)
+
+
+def test_stubs_shared_line_keeps_every_declaration():
+    # Reading only the first small statement carried the rest in with their
+    # values, and left the separating semicolons dangling.
+    code = textwrap.dedent("""\
+        __all__ = ["foo"]; COUNT = 5
+        __version__: str = "1.0"; DEBUG: bool = False
+
+        def foo() -> int:
+            return 42
+        """
+    )
+    output = generate_stub(code)
+    assert output == textwrap.dedent("""\
+        __all__ = ["foo"]
+        COUNT: int
+        __version__: str
+        DEBUG: bool
+        def foo() -> int: ...
+        """)
+
+
+def test_stubs_shared_line_drops_only_what_it_should():
+    # A statement with no place in a stub takes only itself, not its line-mates.
+    code = textwrap.dedent("""\
+        A = 1; print("hi"); B: int = 2
+        c = object(); c.x: int = 5
+        """
+    )
+    output = generate_stub(code)
+    assert output == textwrap.dedent("""\
+        from typing import Any
+        A: int
+        B: int
+        c: Any
+        """)

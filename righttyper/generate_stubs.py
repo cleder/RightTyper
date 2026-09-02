@@ -26,51 +26,76 @@ class PyiTransformer(cst.CSTTransformer):
         self._needs_any = True
         return "Any"
 
+    def handle_small_stmt(
+        self: Self,
+        small: cst.BaseSmallStatement
+    ) -> list[cst.BaseSmallStatement]:
+        """The declarations `small` contributes, or `small` itself when it
+        survives verbatim -- which is how imports and `__all__` keep their value.
+        """
+        if isinstance(small, (cst.Import, cst.ImportFrom)):
+            return [small]
+
+        if isinstance(small, cst.Assign):
+            if not all(isinstance(target.target, cst.Name) for target in small.targets):
+                # can't handle tuples... do we need to?
+                return []
+
+            if any (isinstance(target.target, cst.Name) and target.target.value == '__all__'
+                    for target in small.targets):
+                return [small]
+
+            return [
+                cst.AnnAssign(
+                    target=target.target,
+                    annotation=cst.Annotation(cst.Name(self.value2type(small.value))),
+                    value=None
+                )
+                for target in small.targets
+            ]
+
+        if isinstance(small, cst.AnnAssign):
+            if not isinstance(small.target, cst.Name):
+                # mypy rejects an annotated `c.x` or `d["k"]` in a stub, and
+                # function bodies are `...` by the time we get here, so no
+                # legitimate declaration is lost by dropping these.
+                return []
+
+            if small.target.value == '__all__':
+                # Stripping this value would declare an export list with no
+                # members -- a silent disagreement with the bare form above.
+                return [small]
+
+            # AnnAssign rejects a None value while the `=` token survives
+            return [small.with_changes(value=None, equal=cst.MaybeSentinel.DEFAULT)]
+
+        return []
+
     def handle_body(self: Self, body: abc.Sequence[cst.CSTNode]) -> list[cst.CSTNode]:
         result: list[cst.CSTNode] = []
         for stmt in body:
             if isinstance(stmt, (cst.FunctionDef, cst.ClassDef, cst.If, cst.Try, cst.With)):
                 result.append(stmt)
-            elif (isinstance(stmt, cst.SimpleStatementLine) and
-                  isinstance(stmt.body[0], (cst.Import, cst.ImportFrom))):
-                result.append(stmt)
-            elif (isinstance(stmt, cst.SimpleStatementLine) and isinstance(stmt.body[0], cst.Assign)):
-                if not all(isinstance(target.target, cst.Name) for target in stmt.body[0].targets):
-                    # can't handle tuples... do we need to?
-                    continue
+            elif isinstance(stmt, cst.SimpleStatementLine):
+                kept = [
+                    decl
+                    for small in stmt.body
+                    for decl in self.handle_small_stmt(small)
+                ]
 
-                if any (isinstance(target.target, cst.Name) and target.target.value == '__all__'
-                        for target in stmt.body[0].targets):
+                if len(kept) == len(stmt.body) and all(
+                    decl is small for decl, small in zip(kept, stmt.body)
+                ):
                     result.append(stmt)
                     continue
 
-                for target in stmt.body[0].targets:
-                    type_ann = self.value2type(stmt.body[0].value)
-
-                    result.append(cst.SimpleStatementLine(body=[
-                        cst.AnnAssign(
-                            target=target.target,
-                            annotation=cst.Annotation(cst.Name(type_ann)),
-                            value=None
-                        )
-                    ]))
-            elif (isinstance(stmt, cst.SimpleStatementLine) and isinstance(stmt.body[0], cst.AnnAssign)):
-                if not isinstance(stmt.body[0].target, cst.Name):
-                    # mypy rejects an annotated `c.x` or `d["k"]` in a stub, and
-                    # function bodies are `...` by the time we get here, so no
-                    # legitimate declaration is lost by dropping these.
-                    continue
-
-                if stmt.body[0].target.value == '__all__':
-                    # Stripping this value would declare an export list with no
-                    # members -- a silent disagreement with the bare form above.
-                    result.append(stmt)
-                    continue
-
-                result.append(cst.SimpleStatementLine(body=[
-                    # AnnAssign rejects a None value while the `=` token survives
-                    stmt.body[0].with_changes(value=None, equal=cst.MaybeSentinel.DEFAULT)
-                ]))
+                # One per line; the semicolons separated line-mates that may be gone.
+                result.extend(
+                    cst.SimpleStatementLine(body=[
+                        decl.with_changes(semicolon=cst.MaybeSentinel.DEFAULT)
+                    ])
+                    for decl in kept
+                )
 
         return result
 
