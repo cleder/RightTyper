@@ -61,6 +61,12 @@ class PyiTransformer(cst.CSTTransformer):
                     # legitimate declaration is lost by dropping these.
                     continue
 
+                if stmt.body[0].target.value == '__all__':
+                    # Stripping this value would declare an export list with no
+                    # members -- a silent disagreement with the bare form above.
+                    result.append(stmt)
+                    continue
+
                 result.append(cst.SimpleStatementLine(body=[
                     # AnnAssign rejects a None value while the `=` token survives
                     stmt.body[0].with_changes(value=None, equal=cst.MaybeSentinel.DEFAULT)

@@ -245,3 +245,34 @@ def test_stubs_annassign_non_name_target():
     assert "c.x" not in output, output
     assert 'd["k"]' not in output, output
     assert "y: int\n" in output, output
+
+
+def test_stubs_annotated_all_variable_keeps_value():
+    # Must not disagree with the bare `__all__ = [...]` form kept whole above: a
+    # stub declaring an export list with no members fails silently rather than loudly.
+    code = textwrap.dedent("""\
+        __all__: list[str] = [
+            "foo",
+            "Bar"
+        ]
+
+        COUNT: int = 5
+
+        def foo() -> int:
+            return 42
+
+        class Bar(object):
+            pass
+        """
+    )
+    output = generate_stub(code)
+    assert output == textwrap.dedent("""\
+        __all__: list[str] = [
+            "foo",
+            "Bar"
+        ]
+        COUNT: int
+        def foo() -> int: ...
+        class Bar(object):
+            pass
+        """)
