@@ -195,3 +195,84 @@ def test_stubs_all_variable(tmp_path, monkeypatch):
             def __init__(self, x): ...
         def baz() -> float: ...
         """)
+
+
+def test_stubs_annassign_with_value():
+    code = textwrap.dedent("""\
+        COUNT: int = 5
+
+        def f(x: int) -> int:
+            return x + COUNT
+        """
+    )
+    output = generate_stub(code)
+    assert output == textwrap.dedent("""\
+        COUNT: int
+        def f(x: int) -> int: ...
+        """)
+
+
+def test_stubs_class_annassign_with_value():
+    code = textwrap.dedent("""\
+        class C:
+            x: int = 5
+
+            def f(self) -> int:
+                return self.x
+        """
+    )
+    output = generate_stub(code)
+    assert output == textwrap.dedent("""\
+        class C:
+            x: int
+            def f(self) -> int: ...
+        """)
+
+
+def test_stubs_annassign_non_name_target():
+    # A stub cannot declare a type for either target: mypy answers "Type cannot be
+    # declared in assignment to non-self attribute" and "Unexpected type declaration".
+    code = textwrap.dedent("""\
+        class C: pass
+        c = C()
+        c.x: int = 5
+        d: dict = {}
+        d["k"]: int = 5
+        y: int = 1
+        """
+    )
+    output = generate_stub(code)
+    assert "c.x" not in output, output
+    assert 'd["k"]' not in output, output
+    assert "y: int\n" in output, output
+
+
+def test_stubs_annotated_all_variable_keeps_value():
+    # Must not disagree with the bare `__all__ = [...]` form kept whole above: a
+    # stub declaring an export list with no members fails silently rather than loudly.
+    code = textwrap.dedent("""\
+        __all__: list[str] = [
+            "foo",
+            "Bar"
+        ]
+
+        COUNT: int = 5
+
+        def foo() -> int:
+            return 42
+
+        class Bar(object):
+            pass
+        """
+    )
+    output = generate_stub(code)
+    assert output == textwrap.dedent("""\
+        __all__: list[str] = [
+            "foo",
+            "Bar"
+        ]
+        COUNT: int
+        def foo() -> int: ...
+        class Bar(object):
+            pass
+        """)

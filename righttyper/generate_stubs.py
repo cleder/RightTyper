@@ -55,8 +55,21 @@ class PyiTransformer(cst.CSTTransformer):
                         )
                     ]))
             elif (isinstance(stmt, cst.SimpleStatementLine) and isinstance(stmt.body[0], cst.AnnAssign)):
+                if not isinstance(stmt.body[0].target, cst.Name):
+                    # mypy rejects an annotated `c.x` or `d["k"]` in a stub, and
+                    # function bodies are `...` by the time we get here, so no
+                    # legitimate declaration is lost by dropping these.
+                    continue
+
+                if stmt.body[0].target.value == '__all__':
+                    # Stripping this value would declare an export list with no
+                    # members -- a silent disagreement with the bare form above.
+                    result.append(stmt)
+                    continue
+
                 result.append(cst.SimpleStatementLine(body=[
-                    stmt.body[0].with_changes(value=None)
+                    # AnnAssign rejects a None value while the `=` token survives
+                    stmt.body[0].with_changes(value=None, equal=cst.MaybeSentinel.DEFAULT)
                 ]))
 
         return result
