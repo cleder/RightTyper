@@ -33,10 +33,16 @@ MYPY_CACHE_DIR = (
 
 @pytest.fixture(scope='function', autouse=True)
 def runmypy(tmp_cwd, request):
+    """Type-checks what the test generated, as part of the test itself:
+    `pytest_runtest_call` invokes the check within the call phase.
+    """
+    request.node._post_check = lambda: _run_mypy(request)
     yield
+
+
+def _run_mypy(request):
     if (
-        not request.node._report.passed
-        or 'dont_run_mypy' in request.keywords
+        'dont_run_mypy' in request.keywords
         or request.config.getoption("--no-mypy")
     ):
         return
