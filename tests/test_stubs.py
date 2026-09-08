@@ -515,3 +515,119 @@ def test_stubs_keeps_the_module_s_own_spacing():
 
         def f() -> int: ...
         """)
+
+
+def test_stubs_try_body_is_filtered():
+    code = textwrap.dedent("""\
+        try:
+            import fast as impl
+            X: int = 1
+        except ImportError:
+            import slow as impl
+            X: int = 2
+        """
+    )
+    output = generate_stub(code)
+    assert output == textwrap.dedent("""\
+        try:
+            import fast as impl
+            X: int
+        except ImportError:
+            import slow as impl
+            X: int
+        """)
+
+
+def test_stubs_try_else_and_finally_are_filtered():
+    code = textwrap.dedent("""\
+        try:
+            X: int = 1
+        except ImportError:
+            pass
+        else:
+            Y: int = 2
+        finally:
+            Z: str = "z"
+        """
+    )
+    output = generate_stub(code)
+    assert output == textwrap.dedent("""\
+        try:
+            X: int
+        except ImportError:
+            pass
+        else:
+            Y: int
+        finally:
+            Z: str
+        """)
+
+
+def test_stubs_if_else_branch_is_filtered():
+    code = textwrap.dedent("""\
+        import sys
+        if sys.platform == "win32":
+            X: int = 1
+        else:
+            X: int = 2
+        """
+    )
+    output = generate_stub(code)
+    assert output == textwrap.dedent("""\
+        import sys
+        if sys.platform == "win32":
+            X: int
+        else:
+            X: int
+        """)
+
+
+def test_stubs_except_star_is_kept():
+    code = textwrap.dedent("""\
+        try:
+            X: int = 1
+        except* ValueError:
+            Y: int = 2
+        """
+    )
+    output = generate_stub(code)
+    assert output == textwrap.dedent("""\
+        try:
+            X: int
+        except* ValueError:
+            Y: int
+        """)
+
+
+def test_stubs_match_is_filtered():
+    code = textwrap.dedent("""\
+        import sys
+        match sys.platform:
+            case "win32":
+                X: int = 1
+            case _:
+                class C: pass
+        """
+    )
+    output = generate_stub(code)
+    assert output == textwrap.dedent("""\
+        import sys
+        match sys.platform:
+            case "win32":
+                X: int
+            case _:
+                class C: pass
+        """)
+
+
+def test_stubs_one_line_suite_keeps_declarations():
+    code = textwrap.dedent("""\
+        if True: A: int = 1
+        class C: x: int = 2
+        """
+    )
+    output = generate_stub(code)
+    assert output == textwrap.dedent("""\
+        if True: A: int
+        class C: x: int
+        """)
