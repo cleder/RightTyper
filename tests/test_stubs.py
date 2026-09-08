@@ -313,3 +313,20 @@ def test_stubs_shared_line_drops_only_what_it_should():
         B: int
         c: Any
         """)
+
+
+def test_stubs_any_import_follows_an_import_sharing_a_line():
+    # The `Any` import goes after the imports; a line is an import line if any of
+    # its statements is an import, not just the first.
+    code = textwrap.dedent("""\
+        __all__ = ["a"]; import os
+
+        X = object()
+        """
+    )
+    output = generate_stub(code)
+    assert output == textwrap.dedent("""\
+        __all__ = ["a"]; import os
+        from typing import Any
+        X: Any
+        """)

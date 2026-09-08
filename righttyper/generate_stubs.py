@@ -41,8 +41,8 @@ class PyiTransformer(cst.CSTTransformer):
                 # can't handle tuples... do we need to?
                 return []
 
-            if any (isinstance(target.target, cst.Name) and target.target.value == '__all__'
-                    for target in small.targets):
+            if any(isinstance(target.target, cst.Name) and target.target.value == '__all__'
+                   for target in small.targets):
                 return [small]
 
             return [
@@ -69,6 +69,8 @@ class PyiTransformer(cst.CSTTransformer):
             # AnnAssign rejects a None value while the `=` token survives
             return [small.with_changes(value=None, equal=cst.MaybeSentinel.DEFAULT)]
 
+        # Everything else -- expressions, `pass`, `del`, `global`, augmented
+        # assignments -- declares nothing, so a stub has no place for it.
         return []
 
     def handle_body(self: Self, body: abc.Sequence[cst.CSTNode]) -> list[cst.CSTNode]:
@@ -163,7 +165,8 @@ class PyiTransformer(cst.CSTTransformer):
             imports = [
                 i for i, stmt in enumerate(updated_node.body)
                 if (isinstance(stmt, cst.SimpleStatementLine) and
-                    isinstance(stmt.body[0], (cst.Import, cst.ImportFrom)))
+                    any(isinstance(small, (cst.Import, cst.ImportFrom))
+                        for small in stmt.body))
             ]
 
             # TODO could check if it's already there
