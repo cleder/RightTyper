@@ -435,3 +435,25 @@ def test_stubs_type_alias_keeps_its_value():
         type New = list[int]
         def f(a: Old, b: New) -> None: ...
         """)
+
+
+def test_stubs_all_augmented_assignment_is_kept():
+    # `__all__ += [...]` is a legal spelling mypy honors.  Dropped, the stub
+    # exports less than the module: `from m import *` no longer sees `b`, and
+    # mypy answers `Name "b" is not defined`.
+    code = textwrap.dedent("""\
+        __all__ = ["a"]
+        __all__ += ["b"]
+
+        a: int = 1
+        b: int = 2
+        """
+    )
+    output = generate_stub(code)
+    assert output == textwrap.dedent("""\
+        __all__ = ["a"]
+        __all__ += ["b"]
+
+        a: int
+        b: int
+        """)
