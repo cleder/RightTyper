@@ -351,3 +351,51 @@ def test_stubs_bare_assignment_keeps_its_value():
         ITEMS = [1, 2]
         def f(x: T) -> T: ...
         """)
+
+
+def test_stubs_bare_final_keeps_its_value():
+    # An annotation is normally RightTyper's answer and the value goes, but a
+    # bare `Final` names no type: stripped, mypy answers `Type in Final[...] can
+    # only be omitted if there is an initializer`.  `Final[int]` does name one.
+    code = textwrap.dedent("""\
+        from typing import Final
+        import typing
+
+        X: Final = 5
+        Y: Final[int] = 6
+        Z: typing.Final = 7
+        """
+    )
+    output = generate_stub(code)
+    assert output == textwrap.dedent("""\
+        from typing import Final
+        import typing
+
+        X: Final = 5
+        Y: Final[int]
+        Z: typing.Final = 7
+        """)
+
+
+def test_stubs_type_alias_keeps_its_value():
+    # An alias *is* its value; stripped, mypy answers `Invalid type alias:
+    # expression is not a valid type`, and the PEP 695 spelling dropped whole
+    # leaves signatures naming a type the stub never declares.
+    code = textwrap.dedent("""\
+        from typing import TypeAlias
+
+        Old: TypeAlias = dict[str, int]
+        type New = list[int]
+
+        def f(a: Old, b: New) -> None:
+            pass
+        """
+    )
+    output = generate_stub(code)
+    assert output == textwrap.dedent("""\
+        from typing import TypeAlias
+
+        Old: TypeAlias = dict[str, int]
+        type New = list[int]
+        def f(a: Old, b: New) -> None: ...
+        """)
