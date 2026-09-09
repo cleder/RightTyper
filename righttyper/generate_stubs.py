@@ -1,9 +1,33 @@
 from typing import Self
 import collections.abc as abc
 import libcst as cst
+from libcst.metadata import MetadataWrapper, QualifiedNameProvider
 
 
 class PyiTransformer(cst.CSTTransformer):
+    METADATA_DEPENDENCIES = (QualifiedNameProvider,)
+
+    def __init__(self: Self) -> None:
+        # AnnAssigns whose value must survive; see leave_AnnAssign
+        self._keeps_value: set[cst.AnnAssign] = set()
+
+    # Annotations that name no type of their own, so that stripping the value
+    # would leave the declaration saying nothing.  A subscripted `Final[int]`
+    # is not among them: it does name one.
+    ANNOTATIONS_NEEDING_VALUE = (
+        'typing.Final', 'typing.TypeAlias',
+        'typing_extensions.Final', 'typing_extensions.TypeAlias',
+    )
+
+    def _annotation_needs_value(self: Self, annotation: cst.BaseExpression) -> bool:
+        if isinstance(annotation, cst.Subscript):
+            return False
+
+        return any(
+            qn.name in self.ANNOTATIONS_NEEDING_VALUE
+            for qn in self.get_metadata(QualifiedNameProvider, annotation, set())
+        )
+
     def handle_small_stmt(
         self: Self,
         small: cst.BaseSmallStatement
@@ -26,6 +50,10 @@ class PyiTransformer(cst.CSTTransformer):
             # type checker reads that more precisely than a name could.
             return [small]
 
+        if isinstance(small, cst.TypeAlias):     # type X = ...
+            # An alias is its value, and a signature may name it.
+            return [small]
+
         if isinstance(small, cst.AnnAssign):
             if not isinstance(small.target, cst.Name):
                 # mypy rejects an annotated `c.x` or `d["k"]` in a stub, and
@@ -33,9 +61,10 @@ class PyiTransformer(cst.CSTTransformer):
                 # legitimate declaration is lost by dropping these.
                 return []
 
-            if small.target.value == '__all__':
-                # Stripping this value would declare an export list with no
-                # members -- a silent disagreement with the bare form above.
+            if small.target.value == '__all__' or small in self._keeps_value:
+                # Stripping __all__ would declare an export list with no members
+                # -- a silent disagreement with the bare form above; the rest are
+                # annotations that name no type without their value.
                 return [small]
 
             # AnnAssign rejects a None value while the `=` token survives
@@ -44,6 +73,23 @@ class PyiTransformer(cst.CSTTransformer):
         # Everything else -- expressions, `pass`, `del`, `global`, augmented
         # assignments -- declares nothing, so a stub has no place for it.
         return []
+
+    def leave_AnnAssign(
+        self: Self,
+        original_node: cst.AnnAssign,
+        updated_node: cst.AnnAssign
+    ) -> cst.AnnAssign:
+        """Notes an annotation that cannot stand without its value.
+
+        The reading happens here because QualifiedNameProvider is keyed on the
+        original nodes, which only a leave_ method still holds; the decision is
+        left to handle_small_stmt, so that handle_body can still see whether a
+        line changed.
+        """
+        if self._annotation_needs_value(original_node.annotation.annotation):
+            self._keeps_value.add(updated_node)
+
+        return updated_node
 
     def handle_body(self: Self, body: abc.Sequence[cst.CSTNode]) -> list[cst.CSTNode]:
         result: list[cst.CSTNode] = []
@@ -132,3 +178,8 @@ class PyiTransformer(cst.CSTTransformer):
         return updated_node.with_changes(
             body=self.handle_body(updated_node.body)
         )
+
+
+    def transform_code(self: Self, code: cst.Module) -> cst.Module:
+        """Applies this transformer to a module."""
+        return MetadataWrapper(code).visit(self)

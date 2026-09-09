@@ -6,7 +6,7 @@ from righttyper.generate_stubs import PyiTransformer
 def generate_stub(orig_code: str) -> str:
     m = cst.parse_module(orig_code)
 #    print(m)
-    m = m.visit(PyiTransformer())
+    m = PyiTransformer().transform_code(m)
 #    print(m)
     return m.code
 
@@ -374,6 +374,42 @@ def test_stubs_bare_final_keeps_its_value():
         X: Final = 5
         Y: Final[int]
         Z: typing.Final = 7
+        """)
+
+
+def test_stubs_annotation_is_resolved_not_matched_by_name():
+    # Which annotation this is, is a question about what the name refers to:
+    # an alias for it still needs its value, and a class that merely shares the
+    # name does not -- it names a type of its own.
+    code = textwrap.dedent("""\
+        from typing import Final as F
+        from typing_extensions import TypeAlias
+        import typing as t
+
+        X: F = 5
+        Y: t.Final = 6
+        A: TypeAlias = dict[str, int]
+        """
+    )
+    output = generate_stub(code)
+    assert output == textwrap.dedent("""\
+        from typing import Final as F
+        from typing_extensions import TypeAlias
+        import typing as t
+
+        X: F = 5
+        Y: t.Final = 6
+        A: TypeAlias = dict[str, int]
+        """)
+
+    shadowed = textwrap.dedent("""\
+        class Final: pass
+        X: Final = 5
+        """
+    )
+    assert generate_stub(shadowed) == textwrap.dedent("""\
+        class Final: pass
+        X: Final
         """)
 
 
