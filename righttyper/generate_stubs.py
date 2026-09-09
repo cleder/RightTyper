@@ -70,7 +70,15 @@ class PyiTransformer(cst.CSTTransformer):
             # AnnAssign rejects a None value while the `=` token survives
             return [small.with_changes(value=None, equal=cst.MaybeSentinel.DEFAULT)]
 
-        # Everything else -- expressions, `pass`, `del`, `global`, augmented
+        if (
+            isinstance(small, cst.AugAssign)
+            and isinstance(small.target, cst.Name)
+            and small.target.value == '__all__'
+        ):
+            # `__all__ += [...]`: without it the stub exports less than the module
+            return [small]
+
+        # Everything else -- expressions, `pass`, `del`, `global`, other augmented
         # assignments -- declares nothing, so a stub has no place for it.
         return []
 

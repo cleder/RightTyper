@@ -453,7 +453,6 @@ def test_stubs_all_augmented_assignment_is_kept():
     assert output == textwrap.dedent("""\
         __all__ = ["a"]
         __all__ += ["b"]
-
         a: int
         b: int
         """)
