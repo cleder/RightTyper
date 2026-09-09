@@ -51,12 +51,16 @@ def test_stubs(tmp_path, monkeypatch):
         CALC = 1+1
         TYPED: int
         TYPED_LIST: list[int]
+
         class C:
             class D:
                 PI = 314
                 E: str
+
             def __init__(self: Self, x: int) -> None: ...
+
             def f(self: Self) -> int: ...
+
         def f(x: int) -> int: ...
         """)
 
@@ -78,6 +82,7 @@ def test_stubs_no_any(tmp_path, monkeypatch):
         import sys
 
         A = 42
+
         def f(x: int) -> int: ...
         """)
 
@@ -108,6 +113,7 @@ def test_stubs_empty_class(tmp_path, monkeypatch):
     assert output == textwrap.dedent("""\
         class Foo:
             pass
+
         def f(x: int) -> int: ...
         """)
 
@@ -129,6 +135,7 @@ def test_stubs_conditional(tmp_path, monkeypatch):
         from typing import TYPE_CHECKING
         if TYPE_CHECKING:
             import ast
+
         def f(x: "ast.AST") -> int: ...
         """)
 
@@ -148,6 +155,7 @@ def test_stubs_context_handler(tmp_path, monkeypatch):
     assert output == textwrap.dedent("""\
         with something():
             import ast
+
         def f(x: "ast.AST") -> int: ...
         """)
 
@@ -171,6 +179,7 @@ def test_stubs_try(tmp_path, monkeypatch):
             from foo import bar
         except ImportError:
             import foobar as bar
+
         def f(x: bar) -> int: ...
         """)
 
@@ -201,9 +210,12 @@ def test_stubs_all_variable(tmp_path, monkeypatch):
             "foo",
             "Bar"
         ]
+
         def foo() -> int: ...
+
         class Bar(object):
             def __init__(self, x): ...
+
         def baz() -> float: ...
         """)
 
@@ -219,6 +231,7 @@ def test_stubs_annassign_with_value():
     output = generate_stub(code)
     assert output == textwrap.dedent("""\
         COUNT: int
+
         def f(x: int) -> int: ...
         """)
 
@@ -236,6 +249,7 @@ def test_stubs_class_annassign_with_value():
     assert output == textwrap.dedent("""\
         class C:
             x: int
+
             def f(self) -> int: ...
         """)
 
@@ -282,8 +296,11 @@ def test_stubs_annotated_all_variable_keeps_value():
             "foo",
             "Bar"
         ]
+
         COUNT: int
+
         def foo() -> int: ...
+
         class Bar(object):
             pass
         """)
@@ -305,6 +322,7 @@ def test_stubs_shared_line_keeps_every_declaration():
         __all__ = ["foo"]; COUNT = 5
         __version__: str
         DEBUG: bool
+
         def foo() -> int: ...
         """)
 
@@ -349,6 +367,7 @@ def test_stubs_bare_assignment_keeps_its_value():
         T = TypeVar("T")
         RAW = b"bytes"
         ITEMS = [1, 2]
+
         def f(x: T) -> T: ...
         """)
 
@@ -433,6 +452,7 @@ def test_stubs_type_alias_keeps_its_value():
 
         Old: TypeAlias = dict[str, int]
         type New = list[int]
+
         def f(a: Old, b: New) -> None: ...
         """)
 
@@ -453,6 +473,45 @@ def test_stubs_all_augmented_assignment_is_kept():
     assert output == textwrap.dedent("""\
         __all__ = ["a"]
         __all__ += ["b"]
+
         a: int
         b: int
+        """)
+
+
+def test_stubs_keeps_the_module_s_own_spacing():
+    # Blank lines are the module's grouping and the stub keeps them, whether or
+    # not a given line had to be rebuilt.  A comment goes with its whole line, so
+    # that removing one leaves no blank behind, and a gap is at most one line.
+    code = textwrap.dedent("""\
+        import os
+
+        import sys
+
+        X: int = 1
+
+        Y = 2
+
+        # a comment
+
+        Z: int = 3
+
+
+        def f() -> int:
+            return 1
+        """
+    )
+    output = generate_stub(code)
+    assert output == textwrap.dedent("""\
+        import os
+
+        import sys
+
+        X: int
+
+        Y = 2
+
+        Z: int
+
+        def f() -> int: ...
         """)

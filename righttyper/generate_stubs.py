@@ -1,7 +1,10 @@
-from typing import Self
+from typing import Self, TypeVar
 import collections.abc as abc
 import libcst as cst
 from libcst.metadata import MetadataWrapper, QualifiedNameProvider
+
+
+_Statement = TypeVar("_Statement", bound=cst.BaseStatement)
 
 
 class PyiTransformer(cst.CSTTransformer):
@@ -78,7 +81,7 @@ class PyiTransformer(cst.CSTTransformer):
             # `__all__ += [...]`: without it the stub exports less than the module
             return [small]
 
-        # Everything else -- expressions, `pass`, `del`, `global`, other augmented
+        # Everything else -- expressions, `pass`, `del`, `global`, augmented
         # assignments -- declares nothing, so a stub has no place for it.
         return []
 
@@ -99,11 +102,18 @@ class PyiTransformer(cst.CSTTransformer):
 
         return updated_node
 
+    def _spaced(self: Self, stmt: _Statement, leading: abc.Sequence[cst.EmptyLine]) -> _Statement:
+        """`stmt` with the blank lines a stub keeps: the module's own grouping,
+        but at most one line of it, since removing a statement or a comment tends
+        to leave the blank lines that surrounded it behind.
+        """
+        return stmt.with_changes(leading_lines=leading[-1:])
+
     def handle_body(self: Self, body: abc.Sequence[cst.CSTNode]) -> list[cst.CSTNode]:
         result: list[cst.CSTNode] = []
         for stmt in body:
             if isinstance(stmt, (cst.FunctionDef, cst.ClassDef, cst.If, cst.Try, cst.With)):
-                result.append(stmt)
+                result.append(self._spaced(stmt, stmt.leading_lines))
             elif isinstance(stmt, cst.SimpleStatementLine):
                 kept = [
                     decl
@@ -114,15 +124,18 @@ class PyiTransformer(cst.CSTTransformer):
                 if len(kept) == len(stmt.body) and all(
                     decl is small for decl, small in zip(kept, stmt.body)
                 ):
-                    result.append(stmt)
+                    result.append(self._spaced(stmt, stmt.leading_lines))
                     continue
 
-                # One per line; the semicolons separated line-mates that may be gone.
+                # One per line; the semicolons separated line-mates that may be
+                # gone.  The line's own spacing goes to the first of them, so
+                # that being rebuilt is not something a reader can see.
                 result.extend(
-                    cst.SimpleStatementLine(body=[
-                        decl.with_changes(semicolon=cst.MaybeSentinel.DEFAULT)
-                    ])
-                    for decl in kept
+                    cst.SimpleStatementLine(
+                        body=[decl.with_changes(semicolon=cst.MaybeSentinel.DEFAULT)],
+                        leading_lines=stmt.leading_lines[-1:] if i == 0 else []
+                    )
+                    for i, decl in enumerate(kept)
                 )
 
         return result
@@ -133,8 +146,7 @@ class PyiTransformer(cst.CSTTransformer):
         updated_node: cst.FunctionDef
     ) -> cst.FunctionDef:
         return updated_node.with_changes(
-            body=cst.SimpleStatementSuite([cst.Expr(cst.Ellipsis())]),
-            leading_lines=[]
+            body=cst.SimpleStatementSuite([cst.Expr(cst.Ellipsis())])
         )
 
     def leave_Comment(    # type: ignore[override]
@@ -144,6 +156,22 @@ class PyiTransformer(cst.CSTTransformer):
         ) -> cst.RemovalSentinel:
         return cst.RemoveFromParent()
 
+    def leave_EmptyLine(    # type: ignore[override]
+        self: Self,
+        original_node: cst.EmptyLine,
+        updated_node: cst.EmptyLine
+    ) -> cst.EmptyLine | cst.RemovalSentinel:
+        """Takes the line a comment was on with it.
+
+        leave_Comment removes the comment but leaves its line behind as a blank,
+        which is why blank lines could not simply be kept: a stub would grow one
+        wherever the module had a comment.
+        """
+        if original_node.comment is not None:
+            return cst.RemoveFromParent()
+
+        return updated_node
+
     def leave_ClassDef(
         self: Self,
         original_node: cst.ClassDef,
@@ -152,8 +180,7 @@ class PyiTransformer(cst.CSTTransformer):
         return updated_node.with_changes(
             body=updated_node.body.with_changes(
                 body=self.handle_body(updated_node.body.body)
-            ),
-            leading_lines=[]
+            )
         )
 
     def leave_If(
