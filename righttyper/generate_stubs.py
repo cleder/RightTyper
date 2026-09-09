@@ -4,34 +4,13 @@ import libcst as cst
 
 
 class PyiTransformer(cst.CSTTransformer):
-    def __init__(self: Self) -> None:
-        self._needs_any = False
-
-    def value2type(self: Self, value: cst.CSTNode) -> str:
-        # FIXME not exhaustive; this should come from RightTyper typing
-        if isinstance(value, cst.BaseString):
-            return str.__name__
-        elif isinstance(value, cst.Integer):
-            return int.__name__
-        elif isinstance(value, cst.Float):
-            return float.__name__
-        elif isinstance(value, cst.Tuple):
-            return tuple.__name__
-        elif isinstance(value, cst.BaseList):
-            return list.__name__
-        elif isinstance(value, cst.BaseDict):
-            return dict.__name__
-        elif isinstance(value, cst.BaseSet):
-            return set.__name__
-        self._needs_any = True
-        return "Any"
-
     def handle_small_stmt(
         self: Self,
         small: cst.BaseSmallStatement
     ) -> list[cst.BaseSmallStatement]:
         """The declarations `small` contributes, or `small` itself when it
-        survives verbatim -- which is how imports and `__all__` keep their value.
+        survives verbatim -- which is how imports, `__all__` and assignments
+        RightTyper left bare keep their value.
         """
         if isinstance(small, (cst.Import, cst.ImportFrom)):
             return [small]
@@ -41,18 +20,11 @@ class PyiTransformer(cst.CSTTransformer):
                 # can't handle tuples... do we need to?
                 return []
 
-            if any(isinstance(target.target, cst.Name) and target.target.value == '__all__'
-                   for target in small.targets):
-                return [small]
-
-            return [
-                cst.AnnAssign(
-                    target=target.target,
-                    annotation=cst.Annotation(cst.Name(self.value2type(small.value))),
-                    value=None
-                )
-                for target in small.targets
-            ]
+            # RightTyper annotates what it can type, so an assignment still bare
+            # here is one it declined -- an alias, a TypeVar, or anything at all
+            # under --no-variables.  Its value is what says what it is, and a
+            # type checker reads that more precisely than a name could.
+            return [small]
 
         if isinstance(small, cst.AnnAssign):
             if not isinstance(small.target, cst.Name):
@@ -157,31 +129,6 @@ class PyiTransformer(cst.CSTTransformer):
         original_node: cst.Module,
         updated_node: cst.Module
     ) -> cst.Module:
-        updated_node = updated_node.with_changes(
+        return updated_node.with_changes(
             body=self.handle_body(updated_node.body)
         )
-
-        if self._needs_any:
-            imports = [
-                i for i, stmt in enumerate(updated_node.body)
-                if (isinstance(stmt, cst.SimpleStatementLine) and
-                    any(isinstance(small, (cst.Import, cst.ImportFrom))
-                        for small in stmt.body))
-            ]
-
-            # TODO could check if it's already there
-            position = imports[-1]+1 if imports else 0
-
-            updated_node = updated_node.with_changes(
-                body=(*updated_node.body[:position],
-                      cst.SimpleStatementLine([
-                          cst.ImportFrom(
-                            module=cst.Name('typing'),
-                            names=[cst.ImportAlias(cst.Name('Any'))]
-                          ),
-                      ]),
-                      *updated_node.body[position:]
-                )
-            )
-
-        return updated_node
