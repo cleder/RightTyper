@@ -130,7 +130,7 @@ def process_file(
     if options.generate_stubs:
         stub_file = pathlib.Path(filename).with_suffix(".pyi")
 
-        stubs = transformed.visit(PyiTransformer())
+        stubs = PyiTransformer().transform_code(transformed)
 
         if stub_file.exists():
             stub_file.with_suffix(stub_file.suffix + ".bak").write_text(stub_file.read_text())
