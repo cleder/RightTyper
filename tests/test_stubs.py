@@ -12,12 +12,17 @@ def generate_stub(orig_code: str) -> str:
 
 
 def test_stubs(tmp_path, monkeypatch):
+    # The two paths, side by side: an annotated assignment is RightTyper having
+    # spoken, so the stub keeps the annotation and drops the value; a bare one is
+    # RightTyper having declined, so its value is all the stub knows.
     code = textwrap.dedent("""\
         import sys
 
         A = B = 42
         CALC = 1+1
         CALC += 2
+        TYPED: int = 42
+        TYPED_LIST: list[int] = [1, 2]
 
         # blah blah blah
 
@@ -25,6 +30,7 @@ def test_stubs(tmp_path, monkeypatch):
             '''blah blah blah'''
             class D:
                 PI = 314
+                E: str = "e"
 
             def __init__(self: Self, x: int) -> None:  # initializes me
                 self.x = x
@@ -40,19 +46,23 @@ def test_stubs(tmp_path, monkeypatch):
     output = generate_stub(code)
     assert output == textwrap.dedent("""\
         import sys
-        from typing import Any
-        A: int
-        B: int
-        CALC: Any
+
+        A = B = 42
+        CALC = 1+1
+        TYPED: int
+        TYPED_LIST: list[int]
         class C:
             class D:
-                PI: int
+                PI = 314
+                E: str
             def __init__(self: Self, x: int) -> None: ...
             def f(self: Self) -> int: ...
         def f(x: int) -> int: ...
         """)
 
 def test_stubs_no_any(tmp_path, monkeypatch):
+    # Nothing here needs `Any`: the value stands in for the type a checker would
+    # have to be told, and reads it more precisely than a name could.
     code = textwrap.dedent("""\
         import sys
 
@@ -66,7 +76,8 @@ def test_stubs_no_any(tmp_path, monkeypatch):
     output = generate_stub(code)
     assert output == textwrap.dedent("""\
         import sys
-        A: int
+
+        A = 42
         def f(x: int) -> int: ...
         """)
 
@@ -291,8 +302,7 @@ def test_stubs_shared_line_keeps_every_declaration():
     )
     output = generate_stub(code)
     assert output == textwrap.dedent("""\
-        __all__ = ["foo"]
-        COUNT: int
+        __all__ = ["foo"]; COUNT = 5
         __version__: str
         DEBUG: bool
         def foo() -> int: ...
@@ -308,25 +318,36 @@ def test_stubs_shared_line_drops_only_what_it_should():
     )
     output = generate_stub(code)
     assert output == textwrap.dedent("""\
-        from typing import Any
-        A: int
+        A = 1
         B: int
-        c: Any
+        c = object()
         """)
 
 
-def test_stubs_any_import_follows_an_import_sharing_a_line():
-    # The `Any` import goes after the imports; a line is an import line if any of
-    # its statements is an import, not just the first.
+def test_stubs_bare_assignment_keeps_its_value():
+    # RightTyper annotates what it can type, so a bare assignment reaching the
+    # stub is one it declined -- an alias, a TypeVar, a value it could not
+    # observe.  Its value is the only thing that says what it is, and a checker
+    # reads it more precisely than an invented annotation could.
     code = textwrap.dedent("""\
-        __all__ = ["a"]; import os
+        from typing import TypeVar
 
-        X = object()
+        Alias = dict[str, int]
+        T = TypeVar("T")
+        RAW = b"bytes"
+        ITEMS = [1, 2]
+
+        def f(x: T) -> T:
+            return x
         """
     )
     output = generate_stub(code)
     assert output == textwrap.dedent("""\
-        __all__ = ["a"]; import os
-        from typing import Any
-        X: Any
+        from typing import TypeVar
+
+        Alias = dict[str, int]
+        T = TypeVar("T")
+        RAW = b"bytes"
+        ITEMS = [1, 2]
+        def f(x: T) -> T: ...
         """)
