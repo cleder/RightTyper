@@ -112,7 +112,8 @@ class PyiTransformer(cst.CSTTransformer):
     def handle_body(self: Self, body: abc.Sequence[cst.CSTNode]) -> list[cst.CSTNode]:
         result: list[cst.CSTNode] = []
         for stmt in body:
-            if isinstance(stmt, (cst.FunctionDef, cst.ClassDef, cst.If, cst.Try, cst.With)):
+            if isinstance(stmt, (cst.FunctionDef, cst.ClassDef, cst.If, cst.Try,
+                                 cst.TryStar, cst.With, cst.Match)):
                 result.append(self._spaced(stmt, stmt.leading_lines))
             elif isinstance(stmt, cst.SimpleStatementLine):
                 kept = [
@@ -172,38 +173,37 @@ class PyiTransformer(cst.CSTTransformer):
 
         return updated_node
 
-    def leave_ClassDef(
+    def leave_IndentedBlock(
         self: Self,
-        original_node: cst.ClassDef,
-        updated_node: cst.ClassDef
-    ) -> cst.ClassDef:
-        return updated_node.with_changes(
-            body=updated_node.body.with_changes(
-                body=self.handle_body(updated_node.body.body)
-            )
-        )
+        original_node: cst.IndentedBlock,
+        updated_node: cst.IndentedBlock
+    ) -> cst.IndentedBlock:
+        """Filters every indented body there is.
 
-    def leave_If(
-        self: Self,
-        original_node: cst.If,
-        updated_node: cst.If
-    ) -> cst.If:
-        return updated_node.with_changes(
-            body=updated_node.body.with_changes(
-                body=self.handle_body(updated_node.body.body)
-            )
-        )
+        One method rather than one per statement, so that the bodies that are
+        easy to forget -- an `else`, a `finally`, each `except` and each `case` --
+        cannot be missed.  A function's body is filtered too, and then discarded
+        by leave_FunctionDef.
+        """
+        return updated_node.with_changes(body=self.handle_body(updated_node.body))
 
-    def leave_With(
+    def leave_SimpleStatementSuite(
         self: Self,
-        original_node: cst.With,
-        updated_node: cst.With
-    ) -> cst.With:
-        return updated_node.with_changes(
-            body=updated_node.body.with_changes(
-                body=self.handle_body(updated_node.body.body)
-            )
-        )
+        original_node: cst.SimpleStatementSuite,
+        updated_node: cst.SimpleStatementSuite
+    ) -> cst.SimpleStatementSuite:
+        """Filters a one-line body: `if TYPE_CHECKING: X: int = 1`.
+
+        Its statements are small ones, with no line to belong to, so handle_body
+        cannot read them -- which is how such a body came to be emptied out.
+        """
+        kept = [
+            decl
+            for small in updated_node.body
+            for decl in self.handle_small_stmt(small)
+        ]
+
+        return updated_node.with_changes(body=kept or [cst.Pass()])
 
     def leave_Module(
         self: Self,
