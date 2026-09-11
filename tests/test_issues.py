@@ -58,78 +58,6 @@ def test_issue_200(tmp_path, monkeypatch):
                 return len(p)
 
         Child().handle("xy")
-
-
-def test_issue_199(tmp_path, monkeypatch):
-    """A wrapper that supplies an argument its caller never passed must not
-    put a None inside a CallTrace.
-
-    _get_arg_types returns None for a parameter absent from the locals mapping.
-    That never happens for a real PY_START frame, but the synthetic ArgInfo built
-    for wrapped-function propagation uses bind_partial, which leaves unpassed
-    parameters unbound. The None used to survive into the CallTrace and crash
-    whichever type transformer ran first in finish_recording -- after the traced
-    run had already finished, so righttyper exited 0 having written nothing.
-    """
-    t = textwrap.dedent("""\
-        import functools
-
-        def deco(f):
-            @functools.wraps(f)
-            def wrapper(a):
-                return f(a, 99)     # `b` comes from here, not from the caller
-            return wrapper
-
-        @deco
-        def target(a, b):
-            return a + b
-
-        print(target(1))
-        """)
-
-    monkeypatch.chdir(tmp_path)
-    Path("t.py").write_text(t)
-
-    subprocess.run(
-        [sys.executable, '-m', 'righttyper', 'run', '--only-collect', 't.py'],
-        capture_output=True, text=True,
-    )
-
-    # The failure was silent: exit 0, nothing on the console, no .rt file, and
-    # the traceback only in righttyper.log. Assert on the artifact, not the code,
-    # which is why the CompletedProcess is deliberately not inspected.
-    assert list(Path().glob("*.rt")), (
-        "no .rt written; righttyper.log says:\n"
-        + (Path("righttyper.log").read_text() if Path("righttyper.log").exists() else "(no log)")
-    )
-    log = Path("righttyper.log")
-    assert not log.exists() or "exception after target execution" not in log.read_text()
-
-
-def test_issue_199_synthetic_arg_does_not_erase_observations(tmp_path, monkeypatch):
-    """The filler for an unbound synthetic parameter must not outrank real data.
-
-    The synthetic ArgInfo leaves `b` unbound, so PendingCallTrace fills that slot.
-    Filling it with UnknownTypeInfo -- i.e. Any -- made that trace *subsume* every
-    genuine observation of `b`, because Any absorbs a union rather than vanishing
-    from it, and the parameter came out unannotated despite being observed as int
-    on every call. Never is the union identity, so it drops out instead.
-    """
-    t = textwrap.dedent("""\
-        import functools
-
-        def deco(f):
-            @functools.wraps(f)
-            def wrapper(a):
-                return f(a, 99)
-            return wrapper
-
-        def target(a, b):
-            return a + b
-
-        print(deco(target)(1))
-        print(target(2, 3))
-        print(target(4, 5))
         """)
 
     monkeypatch.chdir(tmp_path)
@@ -173,30 +101,6 @@ def test_issue_200_self_compatibility_check(tmp_path, monkeypatch):
                 return len(p)
 
         Child().handle("xy")
-
-
-def test_issue_197_unhashable_class_on_recording_path(tmp_path, monkeypatch):
-    """The recording path keys tables by type too, ahead of lub() and TypeMap.
-
-    get_value_type/get_type_name look the observed type up in _BUILTINS and
-    _type2handler. Those are plain dicts, so an unhashable class raised there
-    before generalize or typemap ever saw it, and the function was left with no
-    annotation at all -- not even the return type, which has nothing to do with
-    the offending argument.
-    """
-    t = textwrap.dedent("""\
-        class Meta(type):
-            def __eq__(cls, other):
-                return NotImplemented
-            __hash__ = None
-
-        class Unhashable(metaclass=Meta):
-            pass
-
-        def f(x):
-            return 1
-
-        f(Unhashable())
         """)
 
     monkeypatch.chdir(tmp_path)
@@ -208,6 +112,7 @@ def test_issue_197_unhashable_class_on_recording_path(tmp_path, monkeypatch):
     assert not log.exists() or "runtime_checkable" not in log.read_text()
     annotated = Path("t.py").read_text()
     assert "-> int" in annotated, annotated
+
 
 def test_issue_193(tmp_path, monkeypatch):
     # unittest.mock's _Call answers any attribute access with a child _Call,
@@ -363,12 +268,119 @@ def test_issue_193_raising_getattr(tmp_path, monkeypatch):
     assert "def observed(v: int) -> int:" in annotated, annotated
 
 
+def test_issue_197_unhashable_class_on_recording_path(tmp_path, monkeypatch):
+    """The recording path keys tables by type too, ahead of lub() and TypeMap.
+
+    get_value_type/get_type_name look the observed type up in _BUILTINS and
+    _type2handler. Those are plain dicts, so an unhashable class raised there
+    before generalize or typemap ever saw it, and the function was left with no
+    annotation at all -- not even the return type, which has nothing to do with
+    the offending argument.
+    """
+    t = textwrap.dedent("""\
+        class Meta(type):
+            def __eq__(cls, other):
+                return NotImplemented
+            __hash__ = None
+
+        class Unhashable(metaclass=Meta):
+            pass
+
+        def f(x):
+            return 1
+
+        f(Unhashable())
+        """)
+
+    monkeypatch.chdir(tmp_path)
+    Path("t.py").write_text(t)
+
+    subprocess.run([sys.executable, '-m', 'righttyper', 'run', '--root', '.', 't.py'])
+
+    log = Path("righttyper.log")
     assert not log.exists() or "as a dict key" not in log.read_text()
     # The argument stays unannotated -- TypeMap cannot name a class it could not
     # enter -- but the rest of the signature must still be inferred.
     annotated = Path("t.py").read_text()
     assert "def f(x) -> int:" in annotated, annotated
 
+
+def test_issue_199(tmp_path, monkeypatch):
+    """A wrapper that supplies an argument its caller never passed must not
+    put a None inside a CallTrace.
+
+    _get_arg_types returns None for a parameter absent from the locals mapping.
+    That never happens for a real PY_START frame, but the synthetic ArgInfo built
+    for wrapped-function propagation uses bind_partial, which leaves unpassed
+    parameters unbound. The None used to survive into the CallTrace and crash
+    whichever type transformer ran first in finish_recording -- after the traced
+    run had already finished, so righttyper exited 0 having written nothing.
+    """
+    t = textwrap.dedent("""\
+        import functools
+
+        def deco(f):
+            @functools.wraps(f)
+            def wrapper(a):
+                return f(a, 99)     # `b` comes from here, not from the caller
+            return wrapper
+
+        @deco
+        def target(a, b):
+            return a + b
+
+        print(target(1))
+        """)
+
+    monkeypatch.chdir(tmp_path)
+    Path("t.py").write_text(t)
+
+    subprocess.run(
+        [sys.executable, '-m', 'righttyper', 'run', '--only-collect', 't.py'],
+        capture_output=True, text=True,
+    )
+
+    # The failure was silent: exit 0, nothing on the console, no .rt file, and
+    # the traceback only in righttyper.log. Assert on the artifact, not the code,
+    # which is why the CompletedProcess is deliberately not inspected.
+    assert list(Path().glob("*.rt")), (
+        "no .rt written; righttyper.log says:\n"
+        + (Path("righttyper.log").read_text() if Path("righttyper.log").exists() else "(no log)")
+    )
+    log = Path("righttyper.log")
+    assert not log.exists() or "exception after target execution" not in log.read_text()
+
+
+def test_issue_199_synthetic_arg_does_not_erase_observations(tmp_path, monkeypatch):
+    """The filler for an unbound synthetic parameter must not outrank real data.
+
+    The synthetic ArgInfo leaves `b` unbound, so PendingCallTrace fills that slot.
+    Filling it with UnknownTypeInfo -- i.e. Any -- made that trace *subsume* every
+    genuine observation of `b`, because Any absorbs a union rather than vanishing
+    from it, and the parameter came out unannotated despite being observed as int
+    on every call. Never is the union identity, so it drops out instead.
+    """
+    t = textwrap.dedent("""\
+        import functools
+
+        def deco(f):
+            @functools.wraps(f)
+            def wrapper(a):
+                return f(a, 99)
+            return wrapper
+
+        def target(a, b):
+            return a + b
+
+        print(deco(target)(1))
+        print(target(2, 3))
+        print(target(4, 5))
+        """)
+
+    monkeypatch.chdir(tmp_path)
+    Path("t.py").write_text(t)
+
+    subprocess.run([sys.executable, '-m', 'righttyper', 'run', '--root', '.', 't.py'])
 
     annotated = Path("t.py").read_text()
     sig = next(
