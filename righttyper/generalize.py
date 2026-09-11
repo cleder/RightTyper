@@ -114,13 +114,10 @@ def _find_common_container_abc(t1: TypeInfo, t2: TypeInfo) -> type | None:
 def _is_private_type(cls: type) -> bool:
     """Whether cls is defined in a private module without public re-export.
 
-    Uncached front for the cached probe below: ``@cache`` hashes its argument, and
-    an unhashable class must not reach it.  ``_merge_set``'s singleton path calls
-    this before any pairwise ``lub()``, so ``lub()``'s own guard does not cover it.
-
-    An unhashable class is reported as *not* private, which is the conservative
-    answer: it leaves the type alone rather than triggering a de-privatizing MRO
-    walk on a class we could not probe.
+    Uncached front for the cached probe below, since ``@cache`` hashes its
+    argument.  An unhashable class is reported as not private -- the conservative
+    answer, leaving the type alone rather than triggering an MRO walk on a class
+    we could not probe.
     """
     if not is_hashable(cls):
         return False
