@@ -35,14 +35,11 @@ class NeverSayNeverT(TypeInfo.Transformer):
 class MissingSayNothingT(TypeInfo.Transformer):
     """Turns the filler for an unobserved parameter into UnknownTypeInfo.
 
-    recorder fills an unbound synthetic parameter with MissingTypeInfo -- Never,
-    the union identity, so that any real observation of the same parameter wins.
-    When the synthetic trace is the only one, nothing displaces it; Never means
-    uninhabited, so annotating a merely unobserved parameter with it makes mypy
-    reject every caller.  NeverSayNeverT already covers the default path (Never
-    -> Any, which the writer drops); this covers --use-typing-never, where it
-    does not run.  Only the marked filler is affected: a genuine Never, such as
-    the element type of an always-empty *args, still renders.
+    Never means uninhabited, so a filler left as the lone survivor would annotate
+    a merely unobserved parameter with a type that rejects every caller.
+    NeverSayNeverT already covers the default path; this covers
+    --use-typing-never, where it doesn't run.  Only the marked filler is
+    affected -- a genuine Never still renders.
     """
     def visit(vself, node: TypeInfo) -> TypeInfo:
         if node.type_obj is typing.Never and node.is_unknown:

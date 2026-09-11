@@ -124,24 +124,15 @@ class PendingCallTrace:
         # path — the per-entry None case in _get_arg_types only applies to later
         # samples where a name may have been del'd.
         #
-        # A *synthetic* ArgInfo is a different matter: the one built for
-        # wrapped-function propagation can leave a parameter unbound, because
-        # bind_partial permits missing arguments and apply_defaults only fills
-        # those that have defaults. Fill any such gap rather than casting the
-        # None away and letting it reach CallTrace — there it crashed whichever
-        # type transformer ran first in finish_recording. See #199.
+        # The synthetic ArgInfo built for wrapped-function propagation can leave a
+        # parameter unbound, though: bind_partial permits missing arguments. Fill
+        # the gap rather than casting the None away, which crashed the first type
+        # transformer to run in finish_recording. See #199.
         #
-        # Fill with Never, the union identity: from_set() drops it as soon as any
-        # real observation of the same parameter exists, which is exactly what
-        # "this trace saw nothing here" should mean. UnknownTypeInfo is Any, and
-        # Any *subsumes* a union instead of vanishing from it, so it discarded
-        # every genuine observation the parameter had elsewhere.
-        #
-        # MissingTypeInfo rather than NeverTypeInfo: when the synthetic trace is
-        # the *only* trace for that parameter there is nothing to displace the
-        # filler, and a lone Never renders as an uninhabited annotation. The two
-        # compare equal, so merging is unaffected; the mark only lets the
-        # finalizer drop a survivor.
+        # MissingTypeInfo is the union identity, so from_set() drops it as soon as
+        # the parameter has any real observation -- unlike UnknownTypeInfo, which
+        # is Any and subsumes the union instead of vanishing from it. The mark
+        # distinguishes it from a genuine Never once it is the lone survivor.
         self.args_start: tuple[TypeInfo, ...] = tuple(
             t if t is not None else MissingTypeInfo
             for t in self._get_arg_types(arg_info, arg_info.locals)
