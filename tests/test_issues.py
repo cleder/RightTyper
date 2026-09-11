@@ -97,12 +97,10 @@ def test_issue_193_dataclass_init(tmp_path, monkeypatch):
 def test_issue_193_mock_in_class_dict(tmp_path, monkeypatch):
     """unwrap() must terminate on an object that synthesizes __wrapped__.
 
-    unwrap's cycle guard remembers objects by id, which cannot catch _Call: every
-    __wrapped__ access returns a brand-new child, so the id is never seen twice
-    and the loop allocated until the process was OOM-killed (exit 137, no output
-    at all). mock.patch.object() on a base-class method leaves exactly such an
-    object in a class __dict__, which recorder walks looking for overrides -- so
-    this hit ordinary mock-using test suites, righttyper's main workload.
+    mock.patch.object() on a base-class method leaves such an object in a class
+    __dict__, which recorder walks looking for overrides -- so this hit ordinary
+    mock-using suites.  test_unwrap_terminates_on_synthesized_wrapped pins the
+    unit; this is the end-to-end shape.  See #193.
     """
     t = textwrap.dedent("""\
         from unittest.mock import call
@@ -125,7 +123,7 @@ def test_issue_193_mock_in_class_dict(tmp_path, monkeypatch):
 
     p = subprocess.run(
         [sys.executable, '-m', 'righttyper', 'run', '--root', '.', 't.py'],
-        capture_output=True, text=True, timeout=120,
+        capture_output=True, text=True, timeout=20,
     )
 
     assert p.returncode == 0, f"exit {p.returncode} (137 = OOM-killed)\n{p.stderr}"
@@ -136,12 +134,8 @@ def test_issue_193_mock_in_class_dict(tmp_path, monkeypatch):
 def test_issue_193_raising_getattr(tmp_path, monkeypatch):
     """The process-global CALL handler must not raise on a hostile __getattr__.
 
-    getattr suppresses only AttributeError, and the handler probes __code__ on
-    every callable in the process and __wrapped__ along every wrapper chain. An
-    object whose __getattr__ raises something else -- a lazy-import proxy's
-    ImportError, a dict-backed proxy's KeyError -- had that exception surface
-    inside the program under observation, at the call instruction. Same failure
-    class as the _Call crash: see #193.
+    getattr suppresses only AttributeError, so a __getattr__ raising anything else
+    surfaced inside the program under observation, at the call instruction.  See #193.
     """
     t = textwrap.dedent("""\
         class Proxy:
@@ -180,7 +174,7 @@ def test_issue_193_raising_getattr(tmp_path, monkeypatch):
 
     p = subprocess.run(
         [sys.executable, '-m', 'righttyper', 'run', '--root', '.', 't.py'],
-        capture_output=True, text=True, timeout=120,
+        capture_output=True, text=True, timeout=20,
     )
 
     assert p.returncode == 0, f"exit {p.returncode}\n{p.stderr}"
