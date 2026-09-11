@@ -31,6 +31,89 @@ def test_issue_22(tmp_path, monkeypatch):
     assert "def extracted_function(A: list[int]) -> bool" in Path("t.py").read_text()
 
 
+def test_issue_200(tmp_path, monkeypatch):
+    """A TypedDict annotation on an overridden method must not kill `process`.
+
+    A TypedDict subclass satisfies isinstance(x, type) but raises on issubclass
+    by design. It reaches lub() because _propagate_to_parents merges the child's
+    observed argument type with the parent's *declared* one, so the TypedDict
+    arrives as a type_obj even though no runtime value ever has that type.
+
+    The crash is intermittent by nature: Rule 4 is gated on both operands being
+    argless, so calling the override with a dict yields dict[str, int]|Payload
+    and survives. Passing a str keeps the observed type argless, which is what
+    makes it reach issubclass.
+    """
+    t = textwrap.dedent("""\
+        from typing import TypedDict
+
+        class Payload(TypedDict):
+            a: int
+
+        class Base:
+            def handle(self, p: Payload) -> None: ...
+
+        class Child(Base):
+            def handle(self, p):
+                return len(p)
+
+        Child().handle("xy")
+        """)
+
+    monkeypatch.chdir(tmp_path)
+    Path("t.py").write_text(t)
+
+    subprocess.run([sys.executable, '-m', 'righttyper', 'run', '--root', '.', 't.py'])
+
+    # Silent failure: exit 0 with no output. Assert on the artifact.
+    log = Path("righttyper.log")
+    assert not log.exists() or "TypedDict does not support" not in log.read_text()
+    # Union member order differs between the rewrite and the diff paths, so
+    # assert on the members rather than on a rendered ordering.
+    annotated = Path("t.py").read_text()
+    child_sig = next(
+        line for line in annotated.splitlines()
+        if line.strip().startswith("def handle") and "-> int" in line
+    )
+    assert "Payload" in child_sig and "str" in child_sig, child_sig
+
+
+def test_issue_200_self_compatibility_check(tmp_path, monkeypatch):
+    """The Self-compatibility check in _clone_for_context needs the same guard.
+
+    Routing _is_subtype through safe_issubclass covered generalize, but
+    _CloneForContextT.__init__ has its own `issubclass(source, dest)` whose second
+    operand is caller-derived too -- and it sits in _propagate_to_parents, the very
+    path by which such classes arrive. A non-runtime_checkable Protocol with data
+    members raises there, and the run failed the same silent way: exit 0, nothing
+    rewritten.
+    """
+    t = textwrap.dedent("""\
+        from typing import Protocol
+
+        class Base(Protocol):
+            x: int
+            def handle(self, p): ...
+
+        class Child(Base):
+            x = 1
+            def handle(self, p):
+                return len(p)
+
+        Child().handle("xy")
+        """)
+
+    monkeypatch.chdir(tmp_path)
+    Path("t.py").write_text(t)
+
+    subprocess.run([sys.executable, '-m', 'righttyper', 'run', '--root', '.', 't.py'])
+
+    log = Path("righttyper.log")
+    assert not log.exists() or "runtime_checkable" not in log.read_text()
+    annotated = Path("t.py").read_text()
+    assert "-> int" in annotated, annotated
+
+
 def test_issue_193(tmp_path, monkeypatch):
     # unittest.mock's _Call answers any attribute access with a child _Call,
     # so probing for __code__ used to yield an unhashable object that crashed
@@ -94,108 +177,13 @@ def test_issue_193_dataclass_init(tmp_path, monkeypatch):
     assert "Point" in p.stdout      # the script really did run to completion
 
 
-def test_issue_199(tmp_path, monkeypatch):
-    """A wrapper that supplies an argument its caller never passed must not
-    put a None inside a CallTrace.
-
-    _get_arg_types returns None for a parameter absent from the locals mapping.
-    That never happens for a real PY_START frame, but the synthetic ArgInfo built
-    for wrapped-function propagation uses bind_partial, which leaves unpassed
-    parameters unbound. The None used to survive into the CallTrace and crash
-    whichever type transformer ran first in finish_recording -- after the traced
-    run had already finished, so righttyper exited 0 having written nothing.
-    """
-    t = textwrap.dedent("""\
-        import functools
-
-        def deco(f):
-            @functools.wraps(f)
-            def wrapper(a):
-                return f(a, 99)     # `b` comes from here, not from the caller
-            return wrapper
-
-        @deco
-        def target(a, b):
-            return a + b
-
-        print(target(1))
-        """)
-
-    monkeypatch.chdir(tmp_path)
-    Path("t.py").write_text(t)
-
-    subprocess.run(
-        [sys.executable, '-m', 'righttyper', 'run', '--only-collect', 't.py'],
-        capture_output=True, text=True,
-    )
-
-    # The failure was silent: exit 0, nothing on the console, no .rt file, and
-    # the traceback only in righttyper.log. Assert on the artifact, not the code,
-    # which is why the CompletedProcess is deliberately not inspected.
-    assert list(Path().glob("*.rt")), (
-        "no .rt written; righttyper.log says:\n"
-        + (Path("righttyper.log").read_text() if Path("righttyper.log").exists() else "(no log)")
-    )
-    log = Path("righttyper.log")
-    assert not log.exists() or "exception after target execution" not in log.read_text()
-
-
-def test_issue_200(tmp_path, monkeypatch):
-    """A TypedDict annotation on an overridden method must not kill `process`.
-
-    A TypedDict subclass satisfies isinstance(x, type) but raises on issubclass
-    by design. It reaches lub() because _propagate_to_parents merges the child's
-    observed argument type with the parent's *declared* one, so the TypedDict
-    arrives as a type_obj even though no runtime value ever has that type.
-
-    The crash is intermittent by nature: Rule 4 is gated on both operands being
-    argless, so calling the override with a dict yields dict[str, int]|Payload
-    and survives. Passing a str keeps the observed type argless, which is what
-    makes it reach issubclass.
-    """
-    t = textwrap.dedent("""\
-        from typing import TypedDict
-
-        class Payload(TypedDict):
-            a: int
-
-        class Base:
-            def handle(self, p: Payload) -> None: ...
-
-        class Child(Base):
-            def handle(self, p):
-                return len(p)
-
-        Child().handle("xy")
-        """)
-
-    monkeypatch.chdir(tmp_path)
-    Path("t.py").write_text(t)
-
-    subprocess.run([sys.executable, '-m', 'righttyper', 'run', '--root', '.', 't.py'])
-
-    # Silent failure: exit 0 with no output. Assert on the artifact.
-    log = Path("righttyper.log")
-    assert not log.exists() or "TypedDict does not support" not in log.read_text()
-    # Union member order differs between the rewrite and the diff paths, so
-    # assert on the members rather than on a rendered ordering.
-    annotated = Path("t.py").read_text()
-    child_sig = next(
-        line for line in annotated.splitlines()
-        if line.strip().startswith("def handle") and "-> int" in line
-    )
-    assert "Payload" in child_sig and "str" in child_sig, child_sig
-
-
 def test_issue_193_mock_in_class_dict(tmp_path, monkeypatch):
     """unwrap() must terminate on an object that synthesizes __wrapped__.
 
-    unwrap's cycle guard remembers objects by id, which cannot catch _Call: every
-    __wrapped__ access returns a brand-new child, so the id is never seen twice
-    and the loop allocated until the process was OOM-killed (exit 137, no output
-    at all). mock.patch.object() on a base-class method leaves exactly such an
-    object in a class __dict__, which recorder walks looking for overrides -- so
-    this hit ordinary mock-using test suites, righttyper's main workload.
+    mock.patch.object() on a base-class method leaves such an object in a class
+    __dict__, which recorder walks looking for overrides -- so this hit ordinary
+    mock-using suites.  test_unwrap_terminates_on_synthesized_wrapped pins the
+    unit; this is the end-to-end shape.  See #193.
     """
     t = textwrap.dedent("""\
         from unittest.mock import call
@@ -218,7 +206,7 @@ def test_issue_193_mock_in_class_dict(tmp_path, monkeypatch):
 
     p = subprocess.run(
         [sys.executable, '-m', 'righttyper', 'run', '--root', '.', 't.py'],
-        capture_output=True, text=True, timeout=120,
+        capture_output=True, text=True, timeout=20,
     )
 
     assert p.returncode == 0, f"exit {p.returncode} (137 = OOM-killed)\n{p.stderr}"
@@ -229,12 +217,8 @@ def test_issue_193_mock_in_class_dict(tmp_path, monkeypatch):
 def test_issue_193_raising_getattr(tmp_path, monkeypatch):
     """The process-global CALL handler must not raise on a hostile __getattr__.
 
-    getattr suppresses only AttributeError, and the handler probes __code__ on
-    every callable in the process and __wrapped__ along every wrapper chain. An
-    object whose __getattr__ raises something else -- a lazy-import proxy's
-    ImportError, a dict-backed proxy's KeyError -- had that exception surface
-    inside the program under observation, at the call instruction. Same failure
-    class as the _Call crash: see #193.
+    getattr suppresses only AttributeError, so a __getattr__ raising anything else
+    surfaced inside the program under observation, at the call instruction.  See #193.
     """
     t = textwrap.dedent("""\
         class Proxy:
@@ -273,7 +257,7 @@ def test_issue_193_raising_getattr(tmp_path, monkeypatch):
 
     p = subprocess.run(
         [sys.executable, '-m', 'righttyper', 'run', '--root', '.', 't.py'],
-        capture_output=True, text=True, timeout=120,
+        capture_output=True, text=True, timeout=20,
     )
 
     assert p.returncode == 0, f"exit {p.returncode}\n{p.stderr}"
@@ -319,6 +303,52 @@ def test_issue_197_unhashable_class_on_recording_path(tmp_path, monkeypatch):
     # enter -- but the rest of the signature must still be inferred.
     annotated = Path("t.py").read_text()
     assert "def f(x) -> int:" in annotated, annotated
+
+
+def test_issue_199(tmp_path, monkeypatch):
+    """A wrapper that supplies an argument its caller never passed must not
+    put a None inside a CallTrace.
+
+    _get_arg_types returns None for a parameter absent from the locals mapping.
+    That never happens for a real PY_START frame, but the synthetic ArgInfo built
+    for wrapped-function propagation uses bind_partial, which leaves unpassed
+    parameters unbound. The None used to survive into the CallTrace and crash
+    whichever type transformer ran first in finish_recording -- after the traced
+    run had already finished, so righttyper exited 0 having written nothing.
+    """
+    t = textwrap.dedent("""\
+        import functools
+
+        def deco(f):
+            @functools.wraps(f)
+            def wrapper(a):
+                return f(a, 99)     # `b` comes from here, not from the caller
+            return wrapper
+
+        @deco
+        def target(a, b):
+            return a + b
+
+        print(target(1))
+        """)
+
+    monkeypatch.chdir(tmp_path)
+    Path("t.py").write_text(t)
+
+    subprocess.run(
+        [sys.executable, '-m', 'righttyper', 'run', '--only-collect', 't.py'],
+        capture_output=True, text=True,
+    )
+
+    # The failure was silent: exit 0, nothing on the console, no .rt file, and
+    # the traceback only in righttyper.log. Assert on the artifact, not the code,
+    # which is why the CompletedProcess is deliberately not inspected.
+    assert list(Path().glob("*.rt")), (
+        "no .rt written; righttyper.log says:\n"
+        + (Path("righttyper.log").read_text() if Path("righttyper.log").exists() else "(no log)")
+    )
+    log = Path("righttyper.log")
+    assert not log.exists() or "exception after target execution" not in log.read_text()
 
 
 def test_issue_199_synthetic_arg_does_not_erase_observations(tmp_path, monkeypatch):
@@ -412,37 +442,56 @@ def test_issue_199_sole_synthetic_arg_is_not_annotated(tmp_path, monkeypatch):
         )
 
 
-def test_issue_200_self_compatibility_check(tmp_path, monkeypatch):
-    """The Self-compatibility check in _clone_for_context needs the same guard.
+def test_issue_189_no_output_when_pytest_never_collected(tmp_path, monkeypatch):
+    """A pytest run that died before collecting must not rewrite the tree.
 
-    Routing _is_subtype through safe_issubclass covered generalize, but
-    _CloneForContextT.__init__ has its own `issubclass(source, dest)` whose second
-    operand is caller-derived too -- and it sits in _propagate_to_parents, the very
-    path by which such classes arrive. A non-runtime_checkable Protocol with data
-    members raises there, and the run failed the same silent way: exit 0, nothing
-    rewritten.
+    0.1.0-era flags get forwarded to pytest, which rejects them and exits 4 -- but
+    only *after* importing conftest, so observations are not empty and "did we see
+    anything?" cannot tell the two apart.  The output phase then rewrote 568 files
+    in the reporter's tree, leaving .bak copies a gitignore hid.  See #189.
     """
-    t = textwrap.dedent("""\
-        from typing import Protocol
-
-        class Base(Protocol):
-            x: int
-            def handle(self, p): ...
-
-        class Child(Base):
-            x = 1
-            def handle(self, p):
-                return len(p)
-
-        Child().handle("xy")
-        """)
-
     monkeypatch.chdir(tmp_path)
-    Path("t.py").write_text(t)
+    m = textwrap.dedent("""\
+        def f(x):
+            return x + 1
 
-    subprocess.run([sys.executable, '-m', 'righttyper', 'run', '--root', '.', 't.py'])
+        CONST = f(1)
+        """)
+    Path("m.py").write_text(m)
+    Path("conftest.py").write_text("import m\n")
 
-    log = Path("righttyper.log")
-    assert not log.exists() or "runtime_checkable" not in log.read_text()
-    annotated = Path("t.py").read_text()
-    assert "-> int" in annotated, annotated
+    p = subprocess.run(
+        [sys.executable, '-m', 'righttyper', 'run', '--root', '.',
+         '-m', 'pytest', '--no-such-option'],
+        capture_output=True, text=True, timeout=60,
+    )
+
+    assert p.returncode != 0
+    assert Path("m.py").read_text() == m, "source was rewritten after an aborted run"
+    assert not Path("m.py.bak").exists()
+
+
+def test_issue_189_failing_tests_still_annotate(tmp_path, monkeypatch):
+    """The gate must not catch a real run that merely exited non-zero."""
+    monkeypatch.chdir(tmp_path)
+    Path("m.py").write_text(textwrap.dedent("""\
+        def f(x):
+            return x + 1
+        """))
+    Path("test_m.py").write_text(textwrap.dedent("""\
+        from m import f
+
+        def test_ok():
+            assert f(1) == 2
+
+        def test_fails():
+            assert False
+        """))
+
+    p = subprocess.run(
+        [sys.executable, '-m', 'righttyper', 'run', '--root', '.', '-m', 'pytest'],
+        capture_output=True, text=True, timeout=60,
+    )
+
+    assert p.returncode != 0, "expected pytest to report the failing test"
+    assert "def f(x: int) -> int:" in Path("m.py").read_text()

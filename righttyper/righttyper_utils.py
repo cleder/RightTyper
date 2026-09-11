@@ -12,47 +12,17 @@ from righttyper.logger import logger
 from righttyper.options import run_options
 
 
-def is_hashable(obj: object) -> bool:
-    """Whether ``obj`` can safely be used as a dict key or set member.
-
-    ``isinstance(obj, type)`` does not imply hashable: a metaclass may define
-    ``__eq__`` without ``__hash__`` (which implicitly sets ``__hash__ = None``), or
-    supply a ``__hash__`` that raises -- the latter also slips past
-    ``isinstance(obj, abc.Hashable)``, which only checks that ``__hash__`` is not
-    None.  Probing with ``hash()`` is the only reliable test.
-    """
-    try:
-        hash(obj)
-    except Exception:
-        return False
-    return True
-
-
 def safe_issubclass(a: type, b: type) -> bool:
     """``issubclass`` that answers False instead of raising ``TypeError``.
 
-    ``isinstance(x, type)`` does not imply x supports class checks.  A TypedDict
-    subclass refuses them by design (``TypedDict does not support instance and
-    class checks``), and so does a Protocol with non-method members.  Such a
-    class reaches generalize and observations as a *declared* annotation --
-    ``_propagate_to_parents`` merges a child's observed argument type with the
-    parent's declared one, so a TypedDict arrives as a type_obj even though no
-    runtime value ever has that type.  False is the right answer to a subtype
-    query that cannot be evaluated.  See #200.
+    A TypedDict subclass, or a Protocol with non-method members, refuses class
+    checks by design, and reaches us as a *declared* annotation.  False is the
+    right answer to a subtype query that cannot be evaluated.  See #200.
 
-    Note the asymmetry: ``__subclasscheck__`` lives on the *second* argument, so
-    only ``issubclass(x, TypedDict_subclass)`` raises -- ``issubclass(Payload,
-    Collection)`` is fine.  That is why the many ``issubclass(some.type_obj,
-    <fixed ABC>)`` calls across the codebase need no guard, while every call
-    whose second argument is caller-derived does -- generalize's Rules 4, 6 and
-    6.5, and observations' Self-compatibility and strict-subtype checks.  Those
-    are the sites; a new one belongs here too.
-
-    Only ``TypeError`` is caught, and deliberately so: that is how "this class
-    does not support class checks" is spelled, both by ``TypedDict``/``Protocol``
-    and by ``type.__subclasscheck__`` itself.  A ``__subclasscheck__`` that raises
-    anything else is a bug in that class; swallowing it into a False would skew
-    the inferred type silently instead of surfacing the fault.
+    ``__subclasscheck__`` lives on the second argument, so only calls whose
+    second operand is caller-derived need this.  TypeError alone is caught:
+    anything else is a bug in that class, and a swallowed one would skew the
+    inferred type instead of surfacing the fault.
     """
     try:
         return issubclass(a, b)
@@ -70,17 +40,31 @@ _ABSENT: typing.Final = object()
 def _wrapped_of(obj: object) -> typing.Any:
     """``obj.__wrapped__``, or ``_ABSENT`` if it has none -- or refuses to say.
 
-    getattr suppresses only AttributeError; a ``__getattr__`` raising anything
-    else (a lazy-import proxy's ImportError, a dict-backed proxy's KeyError)
-    would escape from the process-global CALL handler into the program under
-    observation.  "Not a wrapper" is the answer that keeps it running.  Broad,
-    unlike safe_issubclass: there a swallowed exception would skew an inferred
-    type, here it can only leave a wrapper unresolved.
+    getattr suppresses only AttributeError, and anything else raised by a
+    ``__getattr__`` would escape the process-global CALL handler into the program
+    under observation.  "Not a wrapper" keeps it running, and can only leave a
+    wrapper unresolved.  See #193.
     """
     try:
         return getattr(obj, "__wrapped__", _ABSENT)
     except Exception:
         return _ABSENT
+
+
+def is_hashable(obj: object) -> bool:
+    """Whether ``obj`` can safely be used as a dict key or set member.
+
+    ``isinstance(obj, type)`` does not imply hashable: a metaclass may define
+    ``__eq__`` without ``__hash__`` (which implicitly sets ``__hash__ = None``), or
+    supply a ``__hash__`` that raises -- the latter also slips past
+    ``isinstance(obj, abc.Hashable)``, which only checks that ``__hash__`` is not
+    None.  Probing with ``hash()`` is the only reliable test.
+    """
+    try:
+        hash(obj)
+    except Exception:
+        return False
+    return True
 
 
 def unwrap(method: abc.Callable|None) -> abc.Callable|None:
@@ -92,13 +76,10 @@ def unwrap(method: abc.Callable|None) -> abc.Callable|None:
     while (wrapped := _wrapped_of(method)) is not _ABSENT:
         if id(method) in visited: return None
 
-        # The id check cannot catch an object that *synthesizes* attributes:
-        # unittest.mock's _Call answers any name with a brand-new child _Call, so
-        # __wrapped__ always exists and is never the same object twice.  Without a
-        # depth cap this loop allocates until the process is OOM-killed -- and
-        # mock.patch.object() on a base-class method puts exactly such an object
-        # in a class __dict__, which recorder walks.  Cap it, as inspect.unwrap
-        # does.  See #193.
+        # The id check cannot catch an object that *synthesizes* attributes: mock's
+        # _Call answers __wrapped__ with a brand-new child, so the id is never seen
+        # twice and this loop allocates until the process is OOM-killed.  Cap it, as
+        # inspect.unwrap does.
         if len(visited) >= _MAX_UNWRAP_DEPTH:
             logger.debug(f"unwrap: giving up after {_MAX_UNWRAP_DEPTH} __wrapped__ links")
             return None
@@ -136,6 +117,17 @@ PYTHON_LIBS = _get_python_libs()
 
 detected_test_files: set[str] = set()
 detected_test_modules: set[str] = set()
+
+# Whether pytest got as far as collecting.  A usage error is reported *after* conftest
+# has been imported, so "we observed something" doesn't tell a real run from one that
+# never started.  See #189.
+pytest_collected = False
+
+
+def set_pytest_collected() -> None:
+    global pytest_collected
+    pytest_collected = True
+
 
 def set_test_files_and_modules(files: set[str], modules: set[str]) -> None:
     detected_test_files.update(files)

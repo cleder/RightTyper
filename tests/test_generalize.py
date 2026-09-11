@@ -1126,6 +1126,29 @@ def test_lub_mro_common_base_without_attrs():
     assert result.type_obj is Base
 
 
+def test_lub_typeddict_parametrized_operands():
+    """Rule 6.5 compares the two operands directly, so a TypedDict lands as the
+    second argument of issubclass -- where __subclasscheck__ lives and raises.
+
+    Rule 4's guard does not cover this: 6.5 requires both operands to carry args,
+    which keeps it out of Rule 4 entirely. Regression test for issue #200.
+    """
+    from typing import TypedDict
+    from righttyper.generalize import lub
+
+    class Payload(TypedDict):
+        a: int
+
+    # Premise: the raise is asymmetric -- only as the second argument.
+    assert issubclass(Payload, dict)
+    with pytest.raises(TypeError):
+        issubclass(str, Payload)
+
+    a = TypeInfo.from_type(list, args=(TypeInfo.from_type(int),))
+    b = TypeInfo.from_type(Payload, args=(TypeInfo.from_type(int),))
+    assert lub(a, b).is_union()
+
+
 # A class whose attribute access raises rather than returning a value. Probing
 # it with a bare getattr() runs the descriptor and propagates the error; this is
 # the shape of issue #188, where zope.interface's machinery raised a TypeError
@@ -1155,117 +1178,6 @@ def test_lub_mro_tolerates_raising_attribute():
     result = lub(TypeInfo.from_type(RaisingChildA), TypeInfo.from_type(RaisingChildB))
     assert not result.is_union()
     assert result.type_obj is Base
-
-
-# A class that is not hashable, because its metaclass defines __eq__ without a
-# matching __hash__ (which implicitly sets __hash__ = None). isinstance(x, type)
-# is still True for these, so lub()'s existing "is it a real type" guard lets
-# them through to rules that hash both operands. This is the shape of issue #197.
-#
-# These are built inside a fixture rather than at module scope on purpose: TypeMap
-# walks every class reachable from every module in sys.modules, so a module-level
-# unhashable class here would leak into unrelated tests.
-
-@pytest.fixture
-def unhashable_types():
-    class Meta(type):
-        def __eq__(cls, other: object) -> bool:
-            return NotImplemented       # type: ignore[return-value]
-        __hash__ = None                 # type: ignore[assignment]
-
-    class A(metaclass=Meta):
-        pass
-
-    class B(metaclass=Meta):
-        pass
-
-    return A, B
-
-
-def test_lub_tolerates_unhashable_type(unhashable_types):
-    """A class whose metaclass makes it unhashable must not take lub() down."""
-    from righttyper.generalize import lub
-
-    A, B = unhashable_types
-    # Guard the premise: these classes really are unhashable.
-    with pytest.raises(TypeError):
-        hash(A)
-
-    a, b = TypeInfo.from_type(A), TypeInfo.from_type(B)
-    result = lub(a, b)
-    assert result.is_union()
-    assert result.to_set() == {a, b}
-
-
-def test_lub_unhashable_against_ordinary_type(unhashable_types):
-    """The guard also covers an unhashable type paired with a normal one."""
-    from righttyper.generalize import lub
-
-    A, _ = unhashable_types
-    a, b = TypeInfo.from_type(A), TypeInfo.from_type(int)
-    result = lub(a, b)
-    assert result.is_union()
-    assert result.to_set() == {a, b}
-
-
-def test_lub_tolerates_raising_hash(unhashable_types):
-    """A __hash__ that raises slips past isinstance(x, abc.Hashable); lub() must cope."""
-    import collections.abc as _abc
-    from righttyper.generalize import lub
-
-    class RaisingMeta(type):
-        def __hash__(cls) -> int:
-            raise TypeError("no hashing here")
-
-    class C(metaclass=RaisingMeta):
-        pass
-
-    class D(metaclass=RaisingMeta):
-        pass
-
-    # These *are* abc.Hashable (they define __hash__), yet hashing them raises.
-    assert isinstance(C, _abc.Hashable)
-
-    a, b = TypeInfo.from_type(C), TypeInfo.from_type(D)
-    result = lub(a, b)
-    assert result.is_union()
-
-
-def test_lub_typeddict_parametrized_operands():
-    """Rule 6.5 compares the two operands directly, so a TypedDict lands as the
-    second argument of issubclass -- where __subclasscheck__ lives and raises.
-
-    Rule 4's guard does not cover this: 6.5 requires both operands to carry args,
-    which keeps it out of Rule 4 entirely. Regression test for issue #200.
-    """
-    from typing import TypedDict
-    from righttyper.generalize import lub
-
-    class Payload(TypedDict):
-        a: int
-
-    # Premise: the raise is asymmetric -- only as the second argument.
-    assert issubclass(Payload, dict)
-    with pytest.raises(TypeError):
-        issubclass(str, Payload)
-
-    a = TypeInfo.from_type(list, args=(TypeInfo.from_type(int),))
-    b = TypeInfo.from_type(Payload, args=(TypeInfo.from_type(int),))
-    assert lub(a, b).is_union()
-
-
-def test_merged_types_singleton_unhashable(unhashable_types):
-    """merged_types() on a single unhashable type must not crash.
-
-    _merge_set's singleton path calls _is_private_type (which is @cache'd, so it
-    hashes its argument) before any pairwise lub(), so lub()'s own guard does not
-    cover this route. Regression test for issue #197.
-    """
-    from righttyper.generalize import merged_types
-
-    A, _ = unhashable_types
-    ti = TypeInfo.from_type(A)
-    assert merged_types({ti}) == ti
 
 
 def test_merged_types_tolerates_raising_attribute():
@@ -1329,6 +1241,94 @@ def test_merged_types_deprivatizes_with_none_valued_attribute():
     result = merged_types({TypeInfo.from_type(_PrivateNoneAttr)},
                           accessed_attributes={"marker"})
     assert result.type_obj is NoneAttrBase
+
+
+# A class that is not hashable, because its metaclass defines __eq__ without a
+# matching __hash__ (which implicitly sets __hash__ = None). isinstance(x, type)
+# is still True for these, so lub()'s existing "is it a real type" guard lets
+# them through to rules that hash both operands. This is the shape of issue #197.
+#
+# These are built inside a fixture rather than at module scope on purpose: TypeMap
+# walks every class reachable from every module in sys.modules, so a module-level
+# unhashable class here would leak into unrelated tests.
+
+@pytest.fixture
+def unhashable_types():
+    class Meta(type):
+        def __eq__(cls, other: object) -> bool:
+            return NotImplemented       # type: ignore[return-value]
+        __hash__ = None                 # type: ignore[assignment]
+
+    class A(metaclass=Meta):
+        pass
+
+    class B(metaclass=Meta):
+        pass
+
+    return A, B
+
+
+def test_lub_tolerates_unhashable_type(unhashable_types):
+    """A class whose metaclass makes it unhashable must not take lub() down."""
+    from righttyper.generalize import lub
+
+    A, B = unhashable_types
+    # Guard the premise: these classes really are unhashable.
+    with pytest.raises(TypeError):
+        hash(A)
+
+    a, b = TypeInfo.from_type(A), TypeInfo.from_type(B)
+    result = lub(a, b)
+    assert result.is_union()
+    assert result.to_set() == {a, b}
+
+
+def test_lub_unhashable_against_ordinary_type(unhashable_types):
+    """The guard also covers an unhashable type paired with a normal one."""
+    from righttyper.generalize import lub
+
+    A, _ = unhashable_types
+    a, b = TypeInfo.from_type(A), TypeInfo.from_type(int)
+    result = lub(a, b)
+    assert result.is_union()
+    assert result.to_set() == {a, b}
+
+
+def test_lub_tolerates_raising_hash():
+    """A __hash__ that raises slips past isinstance(x, abc.Hashable); lub() must cope."""
+    import collections.abc as _abc
+    from righttyper.generalize import lub
+
+    class RaisingMeta(type):
+        def __hash__(cls) -> int:
+            raise TypeError("no hashing here")
+
+    class C(metaclass=RaisingMeta):
+        pass
+
+    class D(metaclass=RaisingMeta):
+        pass
+
+    # These *are* abc.Hashable (they define __hash__), yet hashing them raises.
+    assert isinstance(C, _abc.Hashable)
+
+    a, b = TypeInfo.from_type(C), TypeInfo.from_type(D)
+    result = lub(a, b)
+    assert result.is_union()
+
+
+def test_merged_types_singleton_unhashable(unhashable_types):
+    """merged_types() on a single unhashable type must not crash.
+
+    _merge_set's singleton path calls _is_private_type (which is @cache'd, so it
+    hashes its argument) before any pairwise lub(), so lub()'s own guard does not
+    cover this route. Regression test for issue #197.
+    """
+    from righttyper.generalize import merged_types
+
+    A, _ = unhashable_types
+    ti = TypeInfo.from_type(A)
+    assert merged_types({ti}) == ti
 
 
 def test_lub_mro_no_useful_base():

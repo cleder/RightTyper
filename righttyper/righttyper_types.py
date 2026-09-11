@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from typing import Any, NamedTuple, NewType, Protocol, TypeGuard
 from types import CodeType
 
+from righttyper.logger import logger
+
 
 class CallableWithCode(Protocol):
     """A callable that has a __code__ attribute."""
@@ -15,27 +17,19 @@ class CallableWithCode(Protocol):
 def code_of(obj: object) -> CodeType | None:
     """Return obj's ``__code__``, but only if it is a real code object.
 
-    Two ways a plain ``getattr(obj, "__code__", None)`` misleads, both of which
-    reach the process-global CALL handler:
+    An object may synthesize the attribute rather than raise (mock's _Call answers
+    any name with a child _Call, unhashable and not code), or raise something
+    getattr won't suppress.  Both reach the process-global CALL handler, so catch
+    broadly and check the result's type -- unlike safe_issubclass, a swallowed
+    failure here only means "not code we can annotate".  See #193.
 
-    An object may *synthesize* the attribute rather than raise -- unittest.mock's
-    _Call answers any name with a child _Call, which is neither a code object nor
-    even hashable, and callers went on to use it as a dict key or to hand it to
-    sys.monitoring.  Hence the isinstance check.
-
-    An object may also raise something other than AttributeError from
-    ``__getattr__``, which getattr does not suppress: a lazy-import proxy raising
-    ImportError, a dict-backed one raising KeyError.  There the exception would
-    surface inside the monitored program, from a handler registered for every
-    call in the process -- so catch broadly, unlike safe_issubclass.  A swallowed
-    failure means "not code we can annotate", which is honest; letting it out
-    takes down the program under observation.  The try costs nothing until it
-    fires: ``__code__`` on a real function resolves without ever reaching
-    ``__getattr__``.  See #193.
+    Note this must read dynamically: inspect.getattr_static answers __code__ with
+    the descriptor rather than the code object.
     """
     try:
         code = getattr(obj, '__code__', None)
     except Exception:
+        logger.debug(f"code_of: {type(obj).__name__} raised on __code__", exc_info=True)
         return None
 
     return code if isinstance(code, CodeType) else None

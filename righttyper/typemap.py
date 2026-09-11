@@ -35,15 +35,11 @@ class TypeMap:
 
     def find(self, t: type) -> list[tuple[str, str]]:
         """Given a type object, return all its module and qualified name as strings."""
-        # Guarding the build alone isn't enough: dict.get() hashes its key, so an
-        # unhashable class reaching lookup raises just as it would have during the
-        # scan.  It was never entered, so "no names" is the honest answer.
-        #
-        # try/except rather than is_hashable(): this runs once per type node in
-        # every annotation, and the probe would hash a second time on every one
-        # of the overwhelmingly common hashable lookups.  It catches what
-        # is_hashable does -- any Exception -- so that the class the build skipped
-        # is exactly the class the lookup declines to name; see _lookup_type.
+        # dict.get() hashes its key, so guarding the build alone left lookup
+        # raising on the classes the build had skipped; "no names" is the honest
+        # answer for a class never entered.  try/except rather than is_hashable()
+        # because this runs per type node in every annotation, and it catches what
+        # is_hashable catches, so skip and lookup agree on the same classes.
         try:
             return self._map.get(t, [])
         except Exception:
@@ -186,12 +182,9 @@ class TypeMap:
                         )
                     )
 
-                # Identity, not equality: `obj not in objs_in_path` calls __eq__,
-                # and a metaclass that defines a failing __hash__ may well define
-                # a raising __eq__ too -- so the guard just above would decline to
-                # hash the class and then this check would crash on it anyway.
-                # Cycle detection only ever needed identity; the list is recursion
-                # depth, so scanning it costs nothing.
+                # Identity, not equality: `in` calls __eq__, which a metaclass with
+                # a failing __hash__ may well also define to raise.  Cycle detection
+                # only ever needed identity, and the list is recursion depth.
                 if (
                     isinstance(obj, (type, types.ModuleType))
                     and not any(obj is seen for seen in objs_in_path)

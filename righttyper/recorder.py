@@ -8,8 +8,12 @@ from functools import cache
 from pathlib import Path
 import logging
 from righttyper.logger import logger
-from righttyper.righttyper_types import ArgumentName, VariableName, Filename, CodeId, CallableWithCode, cast_not_None
-from righttyper.typeinfo import TypeInfo, NoneTypeInfo, UnknownTypeInfo, MissingTypeInfo, CallTrace, UnionTypeInfo
+from righttyper.righttyper_types import (
+    ArgumentName, VariableName, Filename, CodeId, CallableWithCode, cast_not_None, code_of
+)
+from righttyper.typeinfo import (
+    TypeInfo, NoneTypeInfo, UnknownTypeInfo, MissingTypeInfo, CallTrace, UnionTypeInfo
+)
 from typing import Final, Any, NewType, overload
 import typing
 from righttyper.observations import Observations, FuncInfo, OverriddenFunction, ArgInfo
@@ -124,24 +128,15 @@ class PendingCallTrace:
         # path — the per-entry None case in _get_arg_types only applies to later
         # samples where a name may have been del'd.
         #
-        # A *synthetic* ArgInfo is a different matter: the one built for
-        # wrapped-function propagation can leave a parameter unbound, because
-        # bind_partial permits missing arguments and apply_defaults only fills
-        # those that have defaults. Fill any such gap rather than casting the
-        # None away and letting it reach CallTrace — there it crashed whichever
-        # type transformer ran first in finish_recording. See #199.
+        # The synthetic ArgInfo built for wrapped-function propagation can leave a
+        # parameter unbound, though: bind_partial permits missing arguments. Fill
+        # the gap rather than casting the None away, which crashed the first type
+        # transformer to run in finish_recording. See #199.
         #
-        # Fill with Never, the union identity: from_set() drops it as soon as any
-        # real observation of the same parameter exists, which is exactly what
-        # "this trace saw nothing here" should mean. UnknownTypeInfo is Any, and
-        # Any *subsumes* a union instead of vanishing from it, so it discarded
-        # every genuine observation the parameter had elsewhere.
-        #
-        # MissingTypeInfo rather than NeverTypeInfo: when the synthetic trace is
-        # the *only* trace for that parameter there is nothing to displace the
-        # filler, and a lone Never renders as an uninhabited annotation. The two
-        # compare equal, so merging is unaffected; the mark only lets the
-        # finalizer drop a survivor.
+        # MissingTypeInfo is the union identity, so from_set() drops it as soon as
+        # the parameter has any real observation -- unlike UnknownTypeInfo, which
+        # is Any and subsumes the union instead of vanishing from it. The mark
+        # distinguishes it from a genuine Never once it is the lone survivor.
         self.args_start: tuple[TypeInfo, ...] = tuple(
             t if t is not None else MissingTypeInfo
             for t in self._get_arg_types(arg_info, arg_info.locals)
@@ -1056,7 +1051,7 @@ def find_method_info(code: CodeType, first_arg: object) -> MethodInfo | None:
                 (is_property and name in ancestor.__dict__)
                 or (
                     (f := unwrap(ancestor.__dict__.get(name, None)))
-                    and getattr(f, "__code__", None) is code
+                    and code_of(f) is code
                 )
             )
         ),
@@ -1098,15 +1093,27 @@ class OverrideFinder:
         """
         for idx, ancestor in enumerate(self._mro[self._index:]):
             f = unwrap(ancestor.__dict__.get(self._method_name, None))
-            if f and getattr(f, "__code__", None) is not code:
-                self._index = self._index + idx + 1
-                return (
-                    OverriddenFunction(
+            f_code = code_of(f)
+            if f and f_code is not code:
+                try:
+                    overridden = OverriddenFunction(
                         normalize_module_name(getattr(f, "__module__", ancestor.__module__)),
                         f.__qualname__,
-                        CodeId.from_code(f.__code__) if hasattr(f, "__code__") else None,
+                        CodeId.from_code(f_code) if f_code else None,
                         get_parent_arg_types(f, child_arg_info)
-                    ),
+                    )
+                except Exception:
+                    # __qualname__ and __module__ are read off a class __dict__ value, so a
+                    # hostile __getattr__ gets a say.  code_of can't cover them: a builtin
+                    # legitimately has no __code__ (hence f_code's None branch), and
+                    # getattr_static answers these with the descriptor, not the value.
+                    logger.debug(f"skipping override of {self._method_name} in {ancestor}",
+                                 exc_info=True)
+                    continue
+
+                self._index = self._index + idx + 1
+                return (
+                    overridden,
                     f if isinstance(f, FunctionType) else None,
                     ancestor,
                 )
