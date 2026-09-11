@@ -22,12 +22,10 @@ _ABSENT: typing.Final = object()
 def _wrapped_of(obj: object) -> typing.Any:
     """``obj.__wrapped__``, or ``_ABSENT`` if it has none -- or refuses to say.
 
-    getattr suppresses only AttributeError; a ``__getattr__`` raising anything
-    else (a lazy-import proxy's ImportError, a dict-backed proxy's KeyError)
-    would escape from the process-global CALL handler into the program under
-    observation.  "Not a wrapper" is the answer that keeps it running.  Broad,
-    unlike safe_issubclass: there a swallowed exception would skew an inferred
-    type, here it can only leave a wrapper unresolved.
+    getattr suppresses only AttributeError, and anything else raised by a
+    ``__getattr__`` would escape the process-global CALL handler into the program
+    under observation.  "Not a wrapper" keeps it running, and can only leave a
+    wrapper unresolved.  See #193.
     """
     try:
         return getattr(obj, "__wrapped__", _ABSENT)
@@ -44,13 +42,10 @@ def unwrap(method: abc.Callable|None) -> abc.Callable|None:
     while (wrapped := _wrapped_of(method)) is not _ABSENT:
         if id(method) in visited: return None
 
-        # The id check cannot catch an object that *synthesizes* attributes:
-        # unittest.mock's _Call answers any name with a brand-new child _Call, so
-        # __wrapped__ always exists and is never the same object twice.  Without a
-        # depth cap this loop allocates until the process is OOM-killed -- and
-        # mock.patch.object() on a base-class method puts exactly such an object
-        # in a class __dict__, which recorder walks.  Cap it, as inspect.unwrap
-        # does.  See #193.
+        # The id check cannot catch an object that *synthesizes* attributes: mock's
+        # _Call answers __wrapped__ with a brand-new child, so the id is never seen
+        # twice and this loop allocates until the process is OOM-killed.  Cap it, as
+        # inspect.unwrap does.
         if len(visited) >= _MAX_UNWRAP_DEPTH:
             logger.debug(f"unwrap: giving up after {_MAX_UNWRAP_DEPTH} __wrapped__ links")
             return None
