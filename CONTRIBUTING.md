@@ -70,6 +70,12 @@ section asks you to avoid. Match the style of the lines you touch and leave the 
 (`black`, `ruff` and `pyright` are also not declared in any extra, so they are not installed
 by the command above.)
 
+RightTyper inspects objects belonging to the program under test, and those objects do not
+always honour the introspection protocols they appear to. Before adding or reviewing a call
+that probes one — `getattr`, `hash`, `issubclass`, following `__wrapped__` — read
+[docs/probing-runtime-objects.md](docs/probing-runtime-objects.md), which collects the
+shapes already met and the helper to use for each.
+
 ## Finding contributions to work on
 Looking at the existing issues is a great way to find something to contribute on. As our projects, by default, use the default GitHub issue labels (enhancement/bug/duplicate/help wanted/invalid/question/wontfix), looking at any 'help wanted' issues is a great place to start.
 
