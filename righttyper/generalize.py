@@ -16,31 +16,21 @@ from righttyper.options import output_options
 _MISSING: Any = object()
 
 
-# Bounded, not @cache: the key is a type object and the entry holds it alive, so
-# an unbounded table pins every class ever probed -- including the ones a long
-# pytest run manufactures per test (make_dataclass, namedtuple, mock autospec)
-# -- for the lifetime of the process.  A cap keeps the ~17x saving on the small
-# working set that lub() actually revisits, without the retention.
+# Bounded, not @cache: the key is a type and the entry holds it alive, so an
+# unbounded table would pin every class a long pytest run manufactures per test
+# for the life of the process.
 @lru_cache(maxsize=2048)
 def _probed_attrs(type_obj: type) -> frozenset[str]:
     """The attributes of ``type_obj`` that lub()'s Rule 7 safety filter considers.
 
-    ``_safe_getattr`` uses ``inspect.getattr_static``, which costs ~17x a plain
-    ``getattr``; lub() re-probes the same handful of types thousands of times in a
-    single run, so memoize the probe per type.
+    Memoized because getattr_static costs ~17x a plain getattr and lub() re-probes
+    the same handful of types thousands of times per run.
 
-    Note this is not only a memoization of the previous ``getattr`` probe: a
-    static lookup answers for attributes a dynamic one cannot resolve (``type``
-    gains ``__abstractmethods__``, ``__annotate__``, ``__annotations__`` and
-    ``__text_signature__``), and drops any that only a metaclass ``__getattr__``
-    would have supplied.  The first direction only widens ``common_attrs``, so
-    Rule 7 merges strictly less; the second can narrow it.  Not executing
-    third-party descriptor code is the point, and is worth that.
-
-    The set is a snapshot taken the first time a type is probed.  A class mutated
-    afterwards (monkeypatching, a late ``setattr``) keeps the attributes it had
-    then; re-probing on every call to catch that would give up the saving the
-    cache exists for, and this set only feeds a conservative safety filter.
+    Not merely a faster version of the old dynamic probe: a static lookup answers
+    for attributes a dynamic one cannot resolve, and drops any a metaclass
+    ``__getattr__`` would have supplied.  The first only makes Rule 7 merge less;
+    the second can narrow the filter.  Not running third-party descriptor code is
+    worth that.  The set is a snapshot, so a class mutated later keeps what it had.
     """
     return frozenset(
         attr for attr in dir(type_obj)
@@ -479,17 +469,8 @@ def _merge_set(
             if public_base is not None:
                 # De-privatize if the public ancestor has all accessed attributes.
                 #
-                # Probe statically here too: this is the same dir()-intersection
-                # filter as Rule 7, on the same arbitrary third-party types, and a
-                # plain getattr runs their descriptors.  #188 crashed here exactly
-                # as it did there -- the singleton path reaches this without ever
-                # calling lub(), so guarding Rule 7 alone left it exposed.
-                #
-                # Probe against _MISSING rather than None: _safe_getattr returns
-                # its default for an attribute it cannot resolve, so a default of
-                # None makes an attribute whose value *is* None indistinguishable
-                # from an absent one -- and a base and subclass sharing such an
-                # attribute would then fail this check and stay private.
+                # Statically here too: the singleton path reaches this without ever
+                # calling lub(), so guarding Rule 7 alone left #188 exposed.
                 check_attrs = accessed_attributes or _probed_attrs(t.type_obj)
                 if all(
                     (a := _safe_getattr(public_base, attr, _MISSING)) is not _MISSING
