@@ -84,3 +84,26 @@ def test_issue_189_failing_tests_still_annotate(tmp_path, monkeypatch):
 
     assert p.returncode != 0, "expected pytest to report the failing test"
     assert "def f(x: int) -> int:" in Path("m.py").read_text()
+
+
+def test_issue_189_no_pickle_when_pytest_never_collected(tmp_path, monkeypatch):
+    """--only-collect must not defer the same rewrite to `process`."""
+    monkeypatch.chdir(tmp_path)
+    m = textwrap.dedent("""\
+        def f(x):
+            return x + 1
+
+        CONST = f(1)
+        """)
+    Path("m.py").write_text(m)
+    Path("conftest.py").write_text("import m\n")
+
+    p = subprocess.run(
+        [sys.executable, '-m', 'righttyper', 'run', '--root', '.', '--only-collect',
+         '-m', 'pytest', '--no-such-option'],
+        capture_output=True, text=True, timeout=60,
+    )
+
+    assert p.returncode != 0
+    assert not list(Path(".").glob("righttyper-*.rt")), "collected an aborted run"
+    assert Path("m.py").read_text() == m
