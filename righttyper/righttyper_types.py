@@ -20,8 +20,8 @@ def code_of(obj: object) -> CodeType | None:
     An object may synthesize the attribute rather than raise (mock's _Call answers
     any name with a child _Call, unhashable and not code), or raise something
     getattr won't suppress.  Both reach the process-global CALL handler, so catch
-    broadly and check the result's type -- unlike safe_issubclass, a swallowed
-    failure here only means "not code we can annotate".  See #193.
+    broadly and check the result's type: a swallowed failure only means "not
+    code we can annotate".  See #193.
 
     Note this must read dynamically: inspect.getattr_static answers __code__ with
     the descriptor rather than the code object.
@@ -33,6 +33,21 @@ def code_of(obj: object) -> CodeType | None:
         return None
 
     return code if isinstance(code, CodeType) else None
+
+
+def wrapped_of(obj: object, default: Any) -> Any:
+    """``obj.__wrapped__``, or ``default`` if it has none -- or refuses to say.
+
+    getattr suppresses only AttributeError, and anything else raised by a
+    ``__getattr__`` would escape the process-global CALL handler into the program
+    under observation.  "Not a wrapper" keeps it running, and can only leave a
+    wrapper unresolved.  See #193.
+    """
+    try:
+        return getattr(obj, "__wrapped__", default)
+    except Exception:
+        logger.debug(f"wrapped_of: {type(obj).__name__} raised on __wrapped__", exc_info=True)
+        return default
 
 
 def has_code(obj: object) -> TypeGuard[CallableWithCode]:
