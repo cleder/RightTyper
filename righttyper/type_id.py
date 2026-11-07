@@ -34,7 +34,7 @@ from righttyper.atomic import AtomicCounter
 from righttyper.random_dict import RandomDict
 from righttyper.typeinfo import TypeInfo, TypeInfoArg, NoneTypeInfo, AnyTypeInfo, UnknownTypeInfo
 from righttyper.righttyper_types import Filename, FunctionName, CodeId, CallableWithCode, has_code
-from righttyper.righttyper_utils import is_test_module, normalize_module_name, unwrap
+from righttyper.righttyper_utils import is_test_module, lookup_type, normalize_module_name, unwrap
 from righttyper.options import run_options, output_options
 from righttyper.logger import logger, sampling_logger, update_sampling_summary
 from righttyper.righttyper_tool import call_mapping, code_to_callable
@@ -303,7 +303,7 @@ def get_type_name(t: type, depth: int = 0) -> TypeInfo:
         logger.error(f"RightTyper failed to compute the type of {t}.")
         return UnknownTypeInfo
 
-    if (ti := _BUILTINS.get(t)):
+    if (ti := lookup_type(_BUILTINS, t)):
         return ti
 
     if t.__module__ == "builtins":
@@ -728,7 +728,7 @@ def _handle_dict(value: Any, depth: int) -> TypeInfo:
     sampler = lambda: ((el := _random_item(value)), value[el])
     args = _sample_container(value, 2, sampler, depth)
     t: type = type(value)
-    if (ti := _BUILTINS.get(t)):
+    if (ti := lookup_type(_BUILTINS, t)):
         return ti.replace(args=args, container_id=_cid_for(value))
     return TypeInfo.from_type(t, args=args, container_id=_cid_for(value))
 
@@ -911,24 +911,29 @@ _type2handler: dict[type, abc.Callable[[Any, int], TypeInfo|None]] = {
 }
 
 
-def _safe_getattr(obj: object, attr: str) -> Any|None:
+def _safe_getattr(obj: object, attr: str, default: Any = None) -> Any|None:
     """Retrieves the given attribute statically, if possible.
        Using getattr or hasattr can lead to problems when __getattr__ is overridden;
        but even inspect.getattr_static may raise TypeError for objects that lack __mro__
        such as scipy.linalg.lapack.dpotrs (a fortran object)
+
+       'default' is returned both for an attribute that isn't there and for a lookup
+       that failed.  It defaults to None for callers that only test truthiness; pass a
+       unique sentinel to tell those two cases apart from an attribute whose value
+       genuinely *is* None.
     """
 
     try:
-        return inspect.getattr_static(obj, attr, None)
+        return inspect.getattr_static(obj, attr, default)
     except:
         try:
             obj_name = str(obj)
         except:
             obj_name = "(object lacking __str__)"   # really?... just in case.
 
-        logger.error(f"getattr_static({obj_name}, \'{attr}\', None) raised exception", exc_info=True)
+        logger.error(f"getattr_static({obj_name}, \'{attr}\', ...) raised exception", exc_info=True)
 
-    return None
+    return default
 
 
 def get_value_type(
@@ -949,11 +954,11 @@ def get_value_type(
     t: type = type(value)
     args: tuple[TypeInfo|str|ellipsis, ...]
 
-    if (h := _type2handler.get(t)):
+    if (h := lookup_type(_type2handler, t)):
         if (ti := h(value, depth)) is not None:
             return ti
 
-    if ti := _BUILTINS.get(t):
+    if ti := lookup_type(_BUILTINS, t):
         return ti
 
     # Is this a spec-based mock?

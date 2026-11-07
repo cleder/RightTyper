@@ -36,6 +36,7 @@ from righttyper.righttyper_tool import (
     enabled_code
 )
 import righttyper.loader as loader
+from righttyper import righttyper_utils
 from righttyper.righttyper_utils import detected_test_modules
 from righttyper.typeinfo import TypeInfo
 from righttyper.righttyper_types import Filename, FuncLoc, FunctionName
@@ -1009,8 +1010,13 @@ def run(
     if run_options.call_sampling:
         schedule_next_capture()
 
+    target_aborted = False
+
     try:
         execute_script_or_module(script, is_module=bool(module), args=args)
+    except BaseException:
+        target_aborted = True
+        raise
     finally:
         rec.try_close_generators()
         shutdown_monitoring()
@@ -1029,7 +1035,21 @@ def run(
                 for m in detected_test_modules:
                     logger.debug(f"test module: {m}")
 
-            if only_collect:
+            if target_aborted and module == 'pytest' and not righttyper_utils.pytest_collected:
+                # pytest died before collecting: a usage error, a bad rootdir, a plugin
+                # that failed to load.  It reports those *after* importing conftest, so
+                # observations are not empty -- conftest's imports ran, and annotating
+                # from them rewrote the tree.  Collection is the signal that the run the
+                # user asked for actually began; a suite that merely *fails* collects
+                # first, and still annotates.  See #189.
+                #
+                # Ahead of `only_collect` because a pickle written here annotates the
+                # tree just the same, one `process` later.
+                print(
+                    "pytest exited before collecting any tests; no output was written.",
+                    file=sys.stderr,
+                )
+            elif only_collect:
                 collected = {
                     'file_version': PKL_FILE_VERSION,
                     'software': TOOL_NAME,
@@ -1110,7 +1130,7 @@ def process(**kwargs):
 
     obs_list = []
     coverage_total: dict | None = None
-    script = None
+    script: Path | None = None
     pkl: dict = {}
     for filename in Path('.').glob(PKL_FILE_NAME.format(N='*')):
         with filename.open("rb") as f:
@@ -1121,9 +1141,14 @@ def process(**kwargs):
                       f"{pkl.get('file_version')}, expected {PKL_FILE_VERSION}")
                 sys.exit(1)
 
-            if script and pkl['script'] != script:
-                print(f"Error: {filename} was collected for {pkl['script']}, but previous file(s) were for {script}")
+            collected_script = pkl['script']
+            if script is not None and collected_script != script:
+                print(
+                    f"Error: {filename} was collected for {collected_script}, "
+                    f"but previous file(s) were for {script}"
+                )
                 sys.exit(1)
+            script = collected_script
 
             # TODO check for compatible options?
             obs_list.append(pkl['observations'])
