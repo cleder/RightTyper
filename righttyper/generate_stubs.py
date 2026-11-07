@@ -1,37 +1,43 @@
-from typing import Self
+from typing import Self, TypeVar
 import collections.abc as abc
 import libcst as cst
+from libcst.metadata import MetadataWrapper, QualifiedNameProvider
+
+
+_Statement = TypeVar("_Statement", bound=cst.BaseStatement)
 
 
 class PyiTransformer(cst.CSTTransformer):
-    def __init__(self: Self) -> None:
-        self._needs_any = False
+    METADATA_DEPENDENCIES = (QualifiedNameProvider,)
 
-    def value2type(self: Self, value: cst.CSTNode) -> str:
-        # FIXME not exhaustive; this should come from RightTyper typing
-        if isinstance(value, cst.BaseString):
-            return str.__name__
-        elif isinstance(value, cst.Integer):
-            return int.__name__
-        elif isinstance(value, cst.Float):
-            return float.__name__
-        elif isinstance(value, cst.Tuple):
-            return tuple.__name__
-        elif isinstance(value, cst.BaseList):
-            return list.__name__
-        elif isinstance(value, cst.BaseDict):
-            return dict.__name__
-        elif isinstance(value, cst.BaseSet):
-            return set.__name__
-        self._needs_any = True
-        return "Any"
+    def __init__(self: Self) -> None:
+        # AnnAssigns whose value must survive; see leave_AnnAssign
+        self._keeps_value: set[cst.AnnAssign] = set()
+
+    # Annotations that name no type of their own, so that stripping the value
+    # would leave the declaration saying nothing.  A subscripted `Final[int]`
+    # is not among them: it does name one.
+    ANNOTATIONS_NEEDING_VALUE = (
+        'typing.Final', 'typing.TypeAlias',
+        'typing_extensions.Final', 'typing_extensions.TypeAlias',
+    )
+
+    def _annotation_needs_value(self: Self, annotation: cst.BaseExpression) -> bool:
+        if isinstance(annotation, cst.Subscript):
+            return False
+
+        return any(
+            qn.name in self.ANNOTATIONS_NEEDING_VALUE
+            for qn in self.get_metadata(QualifiedNameProvider, annotation, set())
+        )
 
     def handle_small_stmt(
         self: Self,
         small: cst.BaseSmallStatement
     ) -> list[cst.BaseSmallStatement]:
         """The declarations `small` contributes, or `small` itself when it
-        survives verbatim -- which is how imports and `__all__` keep their value.
+        survives verbatim -- which is how imports, `__all__` and assignments
+        RightTyper left bare keep their value.
         """
         if isinstance(small, (cst.Import, cst.ImportFrom)):
             return [small]
@@ -41,18 +47,15 @@ class PyiTransformer(cst.CSTTransformer):
                 # can't handle tuples... do we need to?
                 return []
 
-            if any(isinstance(target.target, cst.Name) and target.target.value == '__all__'
-                   for target in small.targets):
-                return [small]
+            # RightTyper annotates what it can type, so an assignment still bare
+            # here is one it declined -- an alias, a TypeVar, or anything at all
+            # under --no-variables.  Its value is what says what it is, and a
+            # type checker reads that more precisely than a name could.
+            return [small]
 
-            return [
-                cst.AnnAssign(
-                    target=target.target,
-                    annotation=cst.Annotation(cst.Name(self.value2type(small.value))),
-                    value=None
-                )
-                for target in small.targets
-            ]
+        if isinstance(small, cst.TypeAlias):     # type X = ...
+            # An alias is its value, and a signature may name it.
+            return [small]
 
         if isinstance(small, cst.AnnAssign):
             if not isinstance(small.target, cst.Name):
@@ -61,23 +64,57 @@ class PyiTransformer(cst.CSTTransformer):
                 # legitimate declaration is lost by dropping these.
                 return []
 
-            if small.target.value == '__all__':
-                # Stripping this value would declare an export list with no
-                # members -- a silent disagreement with the bare form above.
+            if small.target.value == '__all__' or small in self._keeps_value:
+                # Stripping __all__ would declare an export list with no members
+                # -- a silent disagreement with the bare form above; the rest are
+                # annotations that name no type without their value.
                 return [small]
 
             # AnnAssign rejects a None value while the `=` token survives
             return [small.with_changes(value=None, equal=cst.MaybeSentinel.DEFAULT)]
 
+        if (
+            isinstance(small, cst.AugAssign)
+            and isinstance(small.target, cst.Name)
+            and small.target.value == '__all__'
+        ):
+            # `__all__ += [...]`: without it the stub exports less than the module
+            return [small]
+
         # Everything else -- expressions, `pass`, `del`, `global`, augmented
         # assignments -- declares nothing, so a stub has no place for it.
         return []
 
+    def leave_AnnAssign(
+        self: Self,
+        original_node: cst.AnnAssign,
+        updated_node: cst.AnnAssign
+    ) -> cst.AnnAssign:
+        """Notes an annotation that cannot stand without its value.
+
+        The reading happens here because QualifiedNameProvider is keyed on the
+        original nodes, which only a leave_ method still holds; the decision is
+        left to handle_small_stmt, so that handle_body can still see whether a
+        line changed.
+        """
+        if self._annotation_needs_value(original_node.annotation.annotation):
+            self._keeps_value.add(updated_node)
+
+        return updated_node
+
+    def _spaced(self: Self, stmt: _Statement, leading: abc.Sequence[cst.EmptyLine]) -> _Statement:
+        """`stmt` with the blank lines a stub keeps: the module's own grouping,
+        but at most one line of it, since removing a statement or a comment tends
+        to leave the blank lines that surrounded it behind.
+        """
+        return stmt.with_changes(leading_lines=leading[-1:])
+
     def handle_body(self: Self, body: abc.Sequence[cst.CSTNode]) -> list[cst.CSTNode]:
         result: list[cst.CSTNode] = []
         for stmt in body:
-            if isinstance(stmt, (cst.FunctionDef, cst.ClassDef, cst.If, cst.Try, cst.With)):
-                result.append(stmt)
+            if isinstance(stmt, (cst.FunctionDef, cst.ClassDef, cst.If, cst.Try,
+                                 cst.TryStar, cst.With, cst.Match)):
+                result.append(self._spaced(stmt, stmt.leading_lines))
             elif isinstance(stmt, cst.SimpleStatementLine):
                 kept = [
                     decl
@@ -88,15 +125,18 @@ class PyiTransformer(cst.CSTTransformer):
                 if len(kept) == len(stmt.body) and all(
                     decl is small for decl, small in zip(kept, stmt.body)
                 ):
-                    result.append(stmt)
+                    result.append(self._spaced(stmt, stmt.leading_lines))
                     continue
 
-                # One per line; the semicolons separated line-mates that may be gone.
+                # One per line; the semicolons separated line-mates that may be
+                # gone.  The line's own spacing goes to the first of them, so
+                # that being rebuilt is not something a reader can see.
                 result.extend(
-                    cst.SimpleStatementLine(body=[
-                        decl.with_changes(semicolon=cst.MaybeSentinel.DEFAULT)
-                    ])
-                    for decl in kept
+                    cst.SimpleStatementLine(
+                        body=[decl.with_changes(semicolon=cst.MaybeSentinel.DEFAULT)],
+                        leading_lines=stmt.leading_lines[-1:] if i == 0 else []
+                    )
+                    for i, decl in enumerate(kept)
                 )
 
         return result
@@ -107,8 +147,7 @@ class PyiTransformer(cst.CSTTransformer):
         updated_node: cst.FunctionDef
     ) -> cst.FunctionDef:
         return updated_node.with_changes(
-            body=cst.SimpleStatementSuite([cst.Expr(cst.Ellipsis())]),
-            leading_lines=[]
+            body=cst.SimpleStatementSuite([cst.Expr(cst.Ellipsis())])
         )
 
     def leave_Comment(    # type: ignore[override]
@@ -118,70 +157,64 @@ class PyiTransformer(cst.CSTTransformer):
         ) -> cst.RemovalSentinel:
         return cst.RemoveFromParent()
 
-    def leave_ClassDef(
+    def leave_EmptyLine(    # type: ignore[override]
         self: Self,
-        original_node: cst.ClassDef,
-        updated_node: cst.ClassDef
-    ) -> cst.ClassDef:
-        return updated_node.with_changes(
-            body=updated_node.body.with_changes(
-                body=self.handle_body(updated_node.body.body)
-            ),
-            leading_lines=[]
-        )
+        original_node: cst.EmptyLine,
+        updated_node: cst.EmptyLine
+    ) -> cst.EmptyLine | cst.RemovalSentinel:
+        """Takes the line a comment was on with it.
 
-    def leave_If(
-        self: Self,
-        original_node: cst.If,
-        updated_node: cst.If
-    ) -> cst.If:
-        return updated_node.with_changes(
-            body=updated_node.body.with_changes(
-                body=self.handle_body(updated_node.body.body)
-            )
-        )
+        leave_Comment removes the comment but leaves its line behind as a blank,
+        which is why blank lines could not simply be kept: a stub would grow one
+        wherever the module had a comment.
+        """
+        if original_node.comment is not None:
+            return cst.RemoveFromParent()
 
-    def leave_With(
+        return updated_node
+
+    def leave_IndentedBlock(
         self: Self,
-        original_node: cst.With,
-        updated_node: cst.With
-    ) -> cst.With:
-        return updated_node.with_changes(
-            body=updated_node.body.with_changes(
-                body=self.handle_body(updated_node.body.body)
-            )
-        )
+        original_node: cst.IndentedBlock,
+        updated_node: cst.IndentedBlock
+    ) -> cst.IndentedBlock:
+        """Filters every indented body there is.
+
+        One method rather than one per statement, so that the bodies that are
+        easy to forget -- an `else`, a `finally`, each `except` and each `case` --
+        cannot be missed.  A function's body is filtered too, and then discarded
+        by leave_FunctionDef.
+        """
+        return updated_node.with_changes(body=self.handle_body(updated_node.body))
+
+    def leave_SimpleStatementSuite(
+        self: Self,
+        original_node: cst.SimpleStatementSuite,
+        updated_node: cst.SimpleStatementSuite
+    ) -> cst.SimpleStatementSuite:
+        """Filters a one-line body: `if TYPE_CHECKING: X: int = 1`.
+
+        Its statements are small ones, with no line to belong to, so handle_body
+        cannot read them -- which is how such a body came to be emptied out.
+        """
+        kept = [
+            decl
+            for small in updated_node.body
+            for decl in self.handle_small_stmt(small)
+        ]
+
+        return updated_node.with_changes(body=kept or [cst.Pass()])
 
     def leave_Module(
         self: Self,
         original_node: cst.Module,
         updated_node: cst.Module
     ) -> cst.Module:
-        updated_node = updated_node.with_changes(
+        return updated_node.with_changes(
             body=self.handle_body(updated_node.body)
         )
 
-        if self._needs_any:
-            imports = [
-                i for i, stmt in enumerate(updated_node.body)
-                if (isinstance(stmt, cst.SimpleStatementLine) and
-                    any(isinstance(small, (cst.Import, cst.ImportFrom))
-                        for small in stmt.body))
-            ]
 
-            # TODO could check if it's already there
-            position = imports[-1]+1 if imports else 0
-
-            updated_node = updated_node.with_changes(
-                body=(*updated_node.body[:position],
-                      cst.SimpleStatementLine([
-                          cst.ImportFrom(
-                            module=cst.Name('typing'),
-                            names=[cst.ImportAlias(cst.Name('Any'))]
-                          ),
-                      ]),
-                      *updated_node.body[position:]
-                )
-            )
-
-        return updated_node
+    def transform_code(self: Self, code: cst.Module) -> cst.Module:
+        """Applies this transformer to a module."""
+        return MetadataWrapper(code).visit(self)

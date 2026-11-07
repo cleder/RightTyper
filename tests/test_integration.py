@@ -2384,12 +2384,17 @@ def test_generate_stubs():
     assert output == textwrap.dedent("""\
         from typing import Self
         import sys
+
         CONST: int
         CALC: float
+
         class C:
             PI: int
+
             def __init__(self: Self, x: int) -> None: ...
+
             def f(self: Self) -> int: ...
+
         def f(x: int) -> int: ...
         """)
 

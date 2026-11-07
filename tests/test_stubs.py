@@ -6,18 +6,23 @@ from righttyper.generate_stubs import PyiTransformer
 def generate_stub(orig_code: str) -> str:
     m = cst.parse_module(orig_code)
 #    print(m)
-    m = m.visit(PyiTransformer())
+    m = PyiTransformer().transform_code(m)
 #    print(m)
     return m.code
 
 
 def test_stubs(tmp_path, monkeypatch):
+    # The two paths, side by side: an annotated assignment is RightTyper having
+    # spoken, so the stub keeps the annotation and drops the value; a bare one is
+    # RightTyper having declined, so its value is all the stub knows.
     code = textwrap.dedent("""\
         import sys
 
         A = B = 42
         CALC = 1+1
         CALC += 2
+        TYPED: int = 42
+        TYPED_LIST: list[int] = [1, 2]
 
         # blah blah blah
 
@@ -25,6 +30,7 @@ def test_stubs(tmp_path, monkeypatch):
             '''blah blah blah'''
             class D:
                 PI = 314
+                E: str = "e"
 
             def __init__(self: Self, x: int) -> None:  # initializes me
                 self.x = x
@@ -40,19 +46,27 @@ def test_stubs(tmp_path, monkeypatch):
     output = generate_stub(code)
     assert output == textwrap.dedent("""\
         import sys
-        from typing import Any
-        A: int
-        B: int
-        CALC: Any
+
+        A = B = 42
+        CALC = 1+1
+        TYPED: int
+        TYPED_LIST: list[int]
+
         class C:
             class D:
-                PI: int
+                PI = 314
+                E: str
+
             def __init__(self: Self, x: int) -> None: ...
+
             def f(self: Self) -> int: ...
+
         def f(x: int) -> int: ...
         """)
 
 def test_stubs_no_any(tmp_path, monkeypatch):
+    # Nothing here needs `Any`: the value stands in for the type a checker would
+    # have to be told, and reads it more precisely than a name could.
     code = textwrap.dedent("""\
         import sys
 
@@ -66,7 +80,9 @@ def test_stubs_no_any(tmp_path, monkeypatch):
     output = generate_stub(code)
     assert output == textwrap.dedent("""\
         import sys
-        A: int
+
+        A = 42
+
         def f(x: int) -> int: ...
         """)
 
@@ -97,6 +113,7 @@ def test_stubs_empty_class(tmp_path, monkeypatch):
     assert output == textwrap.dedent("""\
         class Foo:
             pass
+
         def f(x: int) -> int: ...
         """)
 
@@ -118,6 +135,7 @@ def test_stubs_conditional(tmp_path, monkeypatch):
         from typing import TYPE_CHECKING
         if TYPE_CHECKING:
             import ast
+
         def f(x: "ast.AST") -> int: ...
         """)
 
@@ -137,6 +155,7 @@ def test_stubs_context_handler(tmp_path, monkeypatch):
     assert output == textwrap.dedent("""\
         with something():
             import ast
+
         def f(x: "ast.AST") -> int: ...
         """)
 
@@ -160,6 +179,7 @@ def test_stubs_try(tmp_path, monkeypatch):
             from foo import bar
         except ImportError:
             import foobar as bar
+
         def f(x: bar) -> int: ...
         """)
 
@@ -190,9 +210,12 @@ def test_stubs_all_variable(tmp_path, monkeypatch):
             "foo",
             "Bar"
         ]
+
         def foo() -> int: ...
+
         class Bar(object):
             def __init__(self, x): ...
+
         def baz() -> float: ...
         """)
 
@@ -208,6 +231,7 @@ def test_stubs_annassign_with_value():
     output = generate_stub(code)
     assert output == textwrap.dedent("""\
         COUNT: int
+
         def f(x: int) -> int: ...
         """)
 
@@ -225,6 +249,7 @@ def test_stubs_class_annassign_with_value():
     assert output == textwrap.dedent("""\
         class C:
             x: int
+
             def f(self) -> int: ...
         """)
 
@@ -271,8 +296,11 @@ def test_stubs_annotated_all_variable_keeps_value():
             "foo",
             "Bar"
         ]
+
         COUNT: int
+
         def foo() -> int: ...
+
         class Bar(object):
             pass
         """)
@@ -291,10 +319,10 @@ def test_stubs_shared_line_keeps_every_declaration():
     )
     output = generate_stub(code)
     assert output == textwrap.dedent("""\
-        __all__ = ["foo"]
-        COUNT: int
+        __all__ = ["foo"]; COUNT = 5
         __version__: str
         DEBUG: bool
+
         def foo() -> int: ...
         """)
 
@@ -308,25 +336,298 @@ def test_stubs_shared_line_drops_only_what_it_should():
     )
     output = generate_stub(code)
     assert output == textwrap.dedent("""\
-        from typing import Any
-        A: int
+        A = 1
         B: int
-        c: Any
+        c = object()
         """)
 
 
-def test_stubs_any_import_follows_an_import_sharing_a_line():
-    # The `Any` import goes after the imports; a line is an import line if any of
-    # its statements is an import, not just the first.
+def test_stubs_bare_assignment_keeps_its_value():
+    # RightTyper annotates what it can type, so a bare assignment reaching the
+    # stub is one it declined -- an alias, a TypeVar, a value it could not
+    # observe.  Its value is the only thing that says what it is, and a checker
+    # reads it more precisely than an invented annotation could.
     code = textwrap.dedent("""\
-        __all__ = ["a"]; import os
+        from typing import TypeVar
 
-        X = object()
+        Alias = dict[str, int]
+        T = TypeVar("T")
+        RAW = b"bytes"
+        ITEMS = [1, 2]
+
+        def f(x: T) -> T:
+            return x
         """
     )
     output = generate_stub(code)
     assert output == textwrap.dedent("""\
-        __all__ = ["a"]; import os
-        from typing import Any
-        X: Any
+        from typing import TypeVar
+
+        Alias = dict[str, int]
+        T = TypeVar("T")
+        RAW = b"bytes"
+        ITEMS = [1, 2]
+
+        def f(x: T) -> T: ...
+        """)
+
+
+def test_stubs_bare_final_keeps_its_value():
+    # An annotation is normally RightTyper's answer and the value goes, but a
+    # bare `Final` names no type: stripped, mypy answers `Type in Final[...] can
+    # only be omitted if there is an initializer`.  `Final[int]` does name one.
+    code = textwrap.dedent("""\
+        from typing import Final
+        import typing
+
+        X: Final = 5
+        Y: Final[int] = 6
+        Z: typing.Final = 7
+        """
+    )
+    output = generate_stub(code)
+    assert output == textwrap.dedent("""\
+        from typing import Final
+        import typing
+
+        X: Final = 5
+        Y: Final[int]
+        Z: typing.Final = 7
+        """)
+
+
+def test_stubs_annotation_is_resolved_not_matched_by_name():
+    # Which annotation this is, is a question about what the name refers to:
+    # an alias for it still needs its value, and a class that merely shares the
+    # name does not -- it names a type of its own.
+    code = textwrap.dedent("""\
+        from typing import Final as F
+        from typing_extensions import TypeAlias
+        import typing as t
+
+        X: F = 5
+        Y: t.Final = 6
+        A: TypeAlias = dict[str, int]
+        """
+    )
+    output = generate_stub(code)
+    assert output == textwrap.dedent("""\
+        from typing import Final as F
+        from typing_extensions import TypeAlias
+        import typing as t
+
+        X: F = 5
+        Y: t.Final = 6
+        A: TypeAlias = dict[str, int]
+        """)
+
+    shadowed = textwrap.dedent("""\
+        class Final: pass
+        X: Final = 5
+        """
+    )
+    assert generate_stub(shadowed) == textwrap.dedent("""\
+        class Final: pass
+        X: Final
+        """)
+
+
+def test_stubs_type_alias_keeps_its_value():
+    # An alias *is* its value; stripped, mypy answers `Invalid type alias:
+    # expression is not a valid type`, and the PEP 695 spelling dropped whole
+    # leaves signatures naming a type the stub never declares.
+    code = textwrap.dedent("""\
+        from typing import TypeAlias
+
+        Old: TypeAlias = dict[str, int]
+        type New = list[int]
+
+        def f(a: Old, b: New) -> None:
+            pass
+        """
+    )
+    output = generate_stub(code)
+    assert output == textwrap.dedent("""\
+        from typing import TypeAlias
+
+        Old: TypeAlias = dict[str, int]
+        type New = list[int]
+
+        def f(a: Old, b: New) -> None: ...
+        """)
+
+
+def test_stubs_all_augmented_assignment_is_kept():
+    # `__all__ += [...]` is a legal spelling mypy honors.  Dropped, the stub
+    # exports less than the module: `from m import *` no longer sees `b`, and
+    # mypy answers `Name "b" is not defined`.
+    code = textwrap.dedent("""\
+        __all__ = ["a"]
+        __all__ += ["b"]
+
+        a: int = 1
+        b: int = 2
+        """
+    )
+    output = generate_stub(code)
+    assert output == textwrap.dedent("""\
+        __all__ = ["a"]
+        __all__ += ["b"]
+
+        a: int
+        b: int
+        """)
+
+
+def test_stubs_keeps_the_module_s_own_spacing():
+    # Blank lines are the module's grouping and the stub keeps them, whether or
+    # not a given line had to be rebuilt.  A comment goes with its whole line, so
+    # that removing one leaves no blank behind, and a gap is at most one line.
+    code = textwrap.dedent("""\
+        import os
+
+        import sys
+
+        X: int = 1
+
+        Y = 2
+
+        # a comment
+
+        Z: int = 3
+
+
+        def f() -> int:
+            return 1
+        """
+    )
+    output = generate_stub(code)
+    assert output == textwrap.dedent("""\
+        import os
+
+        import sys
+
+        X: int
+
+        Y = 2
+
+        Z: int
+
+        def f() -> int: ...
+        """)
+
+
+def test_stubs_try_body_is_filtered():
+    code = textwrap.dedent("""\
+        try:
+            import fast as impl
+            X: int = 1
+        except ImportError:
+            import slow as impl
+            X: int = 2
+        """
+    )
+    output = generate_stub(code)
+    assert output == textwrap.dedent("""\
+        try:
+            import fast as impl
+            X: int
+        except ImportError:
+            import slow as impl
+            X: int
+        """)
+
+
+def test_stubs_try_else_and_finally_are_filtered():
+    code = textwrap.dedent("""\
+        try:
+            X: int = 1
+        except ImportError:
+            pass
+        else:
+            Y: int = 2
+        finally:
+            Z: str = "z"
+        """
+    )
+    output = generate_stub(code)
+    assert output == textwrap.dedent("""\
+        try:
+            X: int
+        except ImportError:
+            pass
+        else:
+            Y: int
+        finally:
+            Z: str
+        """)
+
+
+def test_stubs_if_else_branch_is_filtered():
+    code = textwrap.dedent("""\
+        import sys
+        if sys.platform == "win32":
+            X: int = 1
+        else:
+            X: int = 2
+        """
+    )
+    output = generate_stub(code)
+    assert output == textwrap.dedent("""\
+        import sys
+        if sys.platform == "win32":
+            X: int
+        else:
+            X: int
+        """)
+
+
+def test_stubs_except_star_is_kept():
+    code = textwrap.dedent("""\
+        try:
+            X: int = 1
+        except* ValueError:
+            Y: int = 2
+        """
+    )
+    output = generate_stub(code)
+    assert output == textwrap.dedent("""\
+        try:
+            X: int
+        except* ValueError:
+            Y: int
+        """)
+
+
+def test_stubs_match_is_filtered():
+    code = textwrap.dedent("""\
+        import sys
+        match sys.platform:
+            case "win32":
+                X: int = 1
+            case _:
+                class C: pass
+        """
+    )
+    output = generate_stub(code)
+    assert output == textwrap.dedent("""\
+        import sys
+        match sys.platform:
+            case "win32":
+                X: int
+            case _:
+                class C: pass
+        """)
+
+
+def test_stubs_one_line_suite_keeps_declarations():
+    code = textwrap.dedent("""\
+        if True: A: int = 1
+        class C: x: int = 2
+        """
+    )
+    output = generate_stub(code)
+    assert output == textwrap.dedent("""\
+        if True: A: int
+        class C: x: int
         """)
