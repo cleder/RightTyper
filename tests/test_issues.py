@@ -626,3 +626,48 @@ def test_issue_193_raising_metaclass_getattr_on_first_argument(tmp_path, monkeyp
     assert p.returncode == 0, f"exit {p.returncode}\n{p.stderr}"
     assert p.stdout.split() == ["2"], p.stdout
     assert "def helper(obj: Hostile, n: int) -> int:" in Path("t.py").read_text()
+
+
+def test_issue_197_metaclass_eq_in_post_run_transforms(tmp_path, monkeypatch):
+    """`x in (abc.Generator, ...)` runs x's metaclass __eq__, which may raise."""
+    t = textwrap.dedent("""\
+        class Meta(type):
+            def __eq__(cls, other):
+                raise RuntimeError("cannot compare")
+            __hash__ = type.__hash__
+
+        class Hostile(metaclass=Meta):
+            pass
+
+        def make():
+            return Hostile()
+
+        def take(h):
+            return 1
+
+        def gen():
+            yield Hostile()
+
+        def listed():
+            return [Hostile()]
+
+        take(make())
+        list(gen())
+        listed()
+        """)
+
+    monkeypatch.chdir(tmp_path)
+    Path("t.py").write_text(t)
+
+    p = subprocess.run(
+        [sys.executable, '-m', 'righttyper', 'run', '--root', '.', '--allow-runtime-exceptions', 't.py'],
+        capture_output=True, text=True, timeout=60,
+    )
+
+    assert p.returncode == 0, p.stderr
+    annotated = Path("t.py").read_text()
+    assert "def make() -> Hostile:" in annotated, annotated
+    assert "def take(h: Hostile) -> int:" in annotated, annotated
+    assert "def gen() -> Iterator[Hostile]:" in annotated, annotated
+    assert "def listed() -> list[Hostile]:" in annotated, annotated
+
