@@ -671,3 +671,32 @@ def test_issue_197_metaclass_eq_in_post_run_transforms(tmp_path, monkeypatch):
     assert "def gen() -> Iterator[Hostile]:" in annotated, annotated
     assert "def listed() -> list[Hostile]:" in annotated, annotated
 
+
+
+def test_issue_189_xdist_controller_counts_as_started(tmp_path, monkeypatch):
+    """Under -n N the controller never collects; a run that got to the test loop began."""
+    import pytest
+    pytest.importorskip("xdist")
+
+    monkeypatch.chdir(tmp_path)
+    Path("m.py").write_text(textwrap.dedent("""\
+        def f(x):
+            return x + 1
+
+        CONST = f(1)
+        """))
+    Path("conftest.py").write_text("import m\n")
+    Path("test_m.py").write_text(textwrap.dedent("""\
+        def test_fails():
+            assert False
+        """))
+
+    p = subprocess.run(
+        [sys.executable, '-m', 'righttyper', 'run', '--root', '.', '-m', 'pytest', '-n', '2'],
+        capture_output=True, text=True, timeout=60,
+    )
+
+    assert p.returncode != 0, "expected pytest to report the failing test"
+    assert "before collecting" not in p.stderr, p.stderr
+    assert "def f(x: int) -> int:" in Path("m.py").read_text()
+
