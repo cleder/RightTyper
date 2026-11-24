@@ -32,6 +32,22 @@ class NeverSayNeverT(TypeInfo.Transformer):
         return super().visit(node)
 
 
+class MissingSayNothingT(TypeInfo.Transformer):
+    """Turns the filler for an unobserved parameter into UnknownTypeInfo.
+
+    Never means uninhabited, so a filler left as the lone survivor would annotate
+    a merely unobserved parameter with a type that rejects every caller.
+    NeverSayNeverT already covers the default path; this covers
+    --use-typing-never, where it doesn't run.  Only the marked filler is
+    affected -- a genuine Never still renders.
+    """
+    def visit(vself, node: TypeInfo) -> TypeInfo:
+        if node.type_obj is typing.Never and node.is_unknown:
+            return UnknownTypeInfo
+
+        return super().visit(node)
+
+
 class NoReturnToNeverT(TypeInfo.Transformer):
     """Converts typing.NoReturn to typing.Never,
        which is the more modern way to type a 'no return'"""
@@ -141,7 +157,7 @@ class DepthLimitT(TypeInfo.Transformer):
                 # for containers, we can simply delete arguments (they default to Any)
                 if (
                     (type(t.type_obj) is type and issubclass(t.type_obj, abc.Container))
-                    or t.type_obj in (abc.Callable, typing.Callable)
+                    or any(t.type_obj is c for c in (abc.Callable, typing.Callable))
                 ):
                     self._maxLevel = self._level
                     return t.replace(args=())
@@ -157,7 +173,7 @@ class GeneratorToIteratorT(TypeInfo.Transformer):
         node = super().visit(node)
 
         if (
-            node.type_obj in (abc.Generator, typing.Generator)
+            any(node.type_obj is c for c in (abc.Generator, typing.Generator))
             and len(node.args) == 3
             and isinstance(arg0 := node.args[0], TypeInfo)
             and node.args[1] == NoneTypeInfo
@@ -167,7 +183,7 @@ class GeneratorToIteratorT(TypeInfo.Transformer):
                 arg0 if arg0.is_typevar() else merged_types(arg0.to_set()),
             ))
         elif (
-            node.type_obj in (abc.AsyncGenerator, typing.AsyncGenerator)
+            any(node.type_obj is c for c in (abc.AsyncGenerator, typing.AsyncGenerator))
             and len(node.args) == 2
             and isinstance(arg0 := node.args[0], TypeInfo)
             and node.args[1] == NoneTypeInfo

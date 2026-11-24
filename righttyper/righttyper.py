@@ -36,6 +36,7 @@ from righttyper.righttyper_tool import (
     enabled_code
 )
 import righttyper.loader as loader
+from righttyper import righttyper_utils
 from righttyper.righttyper_utils import detected_test_modules
 from righttyper.typeinfo import TypeInfo
 from righttyper.righttyper_types import Filename, FuncLoc, FunctionName
@@ -740,12 +741,20 @@ def add_output_options(group=None):
     type=str,
     multiple=True,
     callback=validate_fnmatch,
-    help="Exclude the given files (using fnmatch). Can be passed multiple times.",
+    help="Exclude the given files (using fnmatch). Patterns are resolved relative to the"
+         " current directory before matching, so write them as they appear in your project"
+         " (e.g. 'src/generated/*'); a leading '*/' does not mean \"anywhere\", since the"
+         " pattern stays anchored to the current directory."
+         " Can be passed multiple times.",
 )
 @click.option(
     "--exclude-test-files/--no-exclude-test-files",
     default=run_options.exclude_test_files,
-    help="Automatically exclude test modules from typing.",
+    help="Automatically exclude types originating in test modules from the generated"
+         " annotations. Test modules are still imported and traced: they are only"
+         " identified during pytest collection, after import, so this reduces output"
+         " noise rather than tracing overhead. Use --exclude-files to skip them"
+         " entirely.",
 )
 @click.option(
     "--include-functions",
@@ -794,7 +803,9 @@ def add_output_options(group=None):
     multiple=True,
     callback=validate_regexes,
     default=run_options.no_sampling_for,
-    help=f"Rather than sample, record every invocation of any functions matching the given regular expression. Can be passed multiple times.",
+    help=f"Rather than sample, record every invocation of any function whose qualified name"
+         f" ('co_qualname', e.g. 'MyClass.my_method') matches the given regular expression."
+         f" This does not match module or file paths. Can be passed multiple times.",
 )
 @click.option(
     "--replace-dict/--no-replace-dict",
@@ -891,7 +902,10 @@ def add_output_options(group=None):
     "--allow-runtime-exceptions/--no-allow-runtime-exceptions",
     is_flag=True,
     default=run_options.allow_runtime_exceptions,
-    hidden=True,
+    help="Re-raise exceptions raised after your program finishes, while types are being"
+         " processed and files written. By default such an exception is logged to"
+         " \"righttyper.log\" and swallowed, so the run still exits 0, possibly with only"
+         " some files annotated. Pass this to get the traceback and a non-zero exit instead.",
 )
 @click.option(
     "--generalize-tuples",
@@ -1009,8 +1023,13 @@ def run(
     if run_options.call_sampling:
         schedule_next_capture()
 
+    target_aborted = False
+
     try:
         execute_script_or_module(script, is_module=bool(module), args=args)
+    except BaseException:
+        target_aborted = True
+        raise
     finally:
         rec.try_close_generators()
         shutdown_monitoring()
@@ -1029,7 +1048,18 @@ def run(
                 for m in detected_test_modules:
                     logger.debug(f"test module: {m}")
 
-            if only_collect:
+            if target_aborted and module == 'pytest' and not righttyper_utils.pytest_collected:
+                # pytest died before it began: a usage error or an unloadable conftest.
+                # Those surface *after* conftest's imports ran, so observations are not
+                # empty, and annotating from them rewrote the tree.  Collection, or
+                # reaching the test loop (an xdist controller never collects), marks a
+                # run that began; one that merely *fails* still annotates.  See #189.
+                # Ahead of `only_collect`: a pickle written here annotates just the same.
+                print(
+                    "pytest exited before collecting any tests; no output was written.",
+                    file=sys.stderr,
+                )
+            elif only_collect:
                 collected = {
                     'file_version': PKL_FILE_VERSION,
                     'software': TOOL_NAME,
@@ -1110,7 +1140,7 @@ def process(**kwargs):
 
     obs_list = []
     coverage_total: dict | None = None
-    script = None
+    script: Path | None = None
     pkl: dict = {}
     for filename in Path('.').glob(PKL_FILE_NAME.format(N='*')):
         with filename.open("rb") as f:
@@ -1121,9 +1151,14 @@ def process(**kwargs):
                       f"{pkl.get('file_version')}, expected {PKL_FILE_VERSION}")
                 sys.exit(1)
 
-            if script and pkl['script'] != script:
-                print(f"Error: {filename} was collected for {pkl['script']}, but previous file(s) were for {script}")
+            collected_script = pkl['script']
+            if script is not None and collected_script != script:
+                print(
+                    f"Error: {filename} was collected for {collected_script}, "
+                    f"but previous file(s) were for {script}"
+                )
                 sys.exit(1)
+            script = collected_script
 
             # TODO check for compatible options?
             obs_list.append(pkl['observations'])

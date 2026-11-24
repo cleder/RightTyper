@@ -8,8 +8,12 @@ from functools import cache
 from pathlib import Path
 import logging
 from righttyper.logger import logger
-from righttyper.righttyper_types import ArgumentName, VariableName, Filename, CodeId, CallableWithCode, cast_not_None
-from righttyper.typeinfo import TypeInfo, NoneTypeInfo, UnknownTypeInfo, CallTrace, UnionTypeInfo
+from righttyper.righttyper_types import (
+    ArgumentName, VariableName, Filename, CodeId, CallableWithCode, cast_not_None, code_of
+)
+from righttyper.typeinfo import (
+    TypeInfo, NoneTypeInfo, UnknownTypeInfo, MissingTypeInfo, CallTrace, UnionTypeInfo
+)
 from typing import Final, Any, NewType, overload
 import typing
 from righttyper.observations import Observations, FuncInfo, OverriddenFunction, ArgInfo
@@ -119,13 +123,12 @@ class PendingCallTrace:
         self_type: TypeInfo|None,
     ) -> None:
         self.arg_info = arg_info
-        # PY_START's arg_info.locals always contains every arg name (Python
-        # binds parameters before the body runs), so no element here is
-        # ever None — the per-entry None case in _get_arg_types only
-        # applies to later samples where a name may have been del'd.
-        self.args_start = typing.cast(
-            "tuple[TypeInfo, ...]",
-            self._get_arg_types(arg_info, arg_info.locals),
+        # The synthetic ArgInfo for wrapped-function propagation can leave a parameter
+        # unbound; fill it with the union identity (dropped once anything else is
+        # observed) instead of casting the None away.  See #199.
+        self.args_start: tuple[TypeInfo, ...] = tuple(
+            t if t is not None else MissingTypeInfo
+            for t in self._get_arg_types(arg_info, arg_info.locals)
         )
         self.yields: set[TypeInfo] = set()
         self.sends: set[TypeInfo] = set()
@@ -1026,7 +1029,8 @@ def find_method_info(code: CodeType, first_arg: object) -> MethodInfo | None:
     first_arg_class = first_arg if type(first_arg) is type else type(first_arg)
 
     # @property?
-    is_property = isinstance(getattr(type(first_arg), name, None), property)
+    # static: a metaclass __getattr__ may raise on names the class lacks
+    is_property = isinstance(inspect.getattr_static(type(first_arg), name, None), property)
 
     # find class that defines that name, in case it's inherited
     result = next(
@@ -1037,7 +1041,7 @@ def find_method_info(code: CodeType, first_arg: object) -> MethodInfo | None:
                 (is_property and name in ancestor.__dict__)
                 or (
                     (f := unwrap(ancestor.__dict__.get(name, None)))
-                    and getattr(f, "__code__", None) is code
+                    and code_of(f) is code
                 )
             )
         ),
@@ -1054,6 +1058,15 @@ def find_method_info(code: CodeType, first_arg: object) -> MethodInfo | None:
 def is_method_of(code: CodeType, first_arg: object) -> bool:
     """Returns True if 'code' is a method defined on the type of 'first_arg'."""
     return find_method_info(code, first_arg) is not None
+
+
+def _read_attr(obj: object, name: str, default: str) -> str:
+    """getattr that also falls back when __getattr__ raises a non-AttributeError."""
+    try:
+        return getattr(obj, name, default)
+    except Exception:
+        logger.debug(f"{type(obj).__name__} raised on {name}", exc_info=True)
+        return default
 
 
 class OverrideFinder:
@@ -1079,15 +1092,19 @@ class OverrideFinder:
         """
         for idx, ancestor in enumerate(self._mro[self._index:]):
             f = unwrap(ancestor.__dict__.get(self._method_name, None))
-            if f and getattr(f, "__code__", None) is not code:
+            f_code = code_of(f)
+            if f and f_code is not code:
+                # f may refuse to name itself; fall back to the ancestor's name
+                overridden = OverriddenFunction(
+                    normalize_module_name(_read_attr(f, "__module__", ancestor.__module__)),
+                    _read_attr(f, "__qualname__", f"{ancestor.__qualname__}.{self._method_name}"),
+                    CodeId.from_code(f_code) if f_code else None,
+                    get_parent_arg_types(f, child_arg_info)
+                )
+
                 self._index = self._index + idx + 1
                 return (
-                    OverriddenFunction(
-                        normalize_module_name(getattr(f, "__module__", ancestor.__module__)),
-                        f.__qualname__,
-                        CodeId.from_code(f.__code__) if hasattr(f, "__code__") else None,
-                        get_parent_arg_types(f, child_arg_info)
-                    ),
+                    overridden,
                     f if isinstance(f, FunctionType) else None,
                     ancestor,
                 )
